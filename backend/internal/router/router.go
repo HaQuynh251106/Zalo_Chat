@@ -142,6 +142,7 @@ func New(d Deps) http.Handler {
 			r.Get("/wallet/transactions", d.WalletH.History)
 			r.Post("/wallet/topup", d.WalletH.Topup)
 			r.Post("/wallet/transfer", d.WalletH.Transfer)
+			r.Post("/wallet/red-pocket/{msgID}/open", d.WalletH.OpenRedPocket)
 
 			r.Get("/ws", d.WSH.ServeHTTP)
 		})

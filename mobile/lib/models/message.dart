@@ -24,6 +24,7 @@ class Message {
   final List<MessageReaction> reactions;
   final int? moneyAmountCents;
   final String? moneyTxnId;
+  final DateTime? moneyOpenedAt;
 
   Message({
     required this.id,
@@ -41,10 +42,12 @@ class Message {
     this.reactions = const [],
     this.moneyAmountCents,
     this.moneyTxnId,
+    this.moneyOpenedAt,
   });
 
   bool get isPinned => pinnedAt != null;
   bool get isMoney => type == 'money' && moneyAmountCents != null;
+  bool get isMoneyOpened => moneyOpenedAt != null;
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
         id: j['id'] as String,
@@ -66,6 +69,9 @@ class Message {
             .toList(),
         moneyAmountCents: (j['money_amount_cents'] as num?)?.toInt(),
         moneyTxnId: j['money_txn_id'] as String?,
+        moneyOpenedAt: j['money_opened_at'] != null
+            ? DateTime.parse(j['money_opened_at'] as String)
+            : null,
       );
 
   Message copyWith({
@@ -73,6 +79,7 @@ class Message {
     String? body,
     Object? pinnedAt = _sentinel,
     List<MessageReaction>? reactions,
+    Object? moneyOpenedAt = _sentinel,
   }) =>
       Message(
         id: id,
@@ -92,6 +99,9 @@ class Message {
         reactions: reactions ?? this.reactions,
         moneyAmountCents: moneyAmountCents,
         moneyTxnId: moneyTxnId,
+        moneyOpenedAt: identical(moneyOpenedAt, _sentinel)
+            ? this.moneyOpenedAt
+            : moneyOpenedAt as DateTime?,
       );
 }
 

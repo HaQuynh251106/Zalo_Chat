@@ -1,7 +1,7 @@
 // Package wallet implements an in-app VND wallet: top-up (mock), peer-to-peer
 // transfer (transactional, friendship-gated, block-aware) and history.
 //
-// Amounts are stored as BIGINT "cents" where 1 cent = 1 VND × 0.01.
+// Amounts are stored as BIGINT "cents" where 1 cent = 1 VND * 0.01.
 // In practice the smallest unit users transact in is 1.000 ₫ = 100_000 cents.
 package wallet
 
@@ -17,7 +17,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/message"
 )
 
-// Limits expressed in cents (VND × 100).
+// Limits expressed in cents (VND * 100).
 const (
 	MinTopupCents    int64 = 10_000 * 100     // 10.000 ₫
 	MaxTopupCents    int64 = 50_000_000 * 100 // 50.000.000 ₫
@@ -141,7 +141,7 @@ func (s *Service) Topup(ctx context.Context, userID uuid.UUID, amountCents int64
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO wallet_transactions
 		    (user_id, type, amount_cents, balance_after, memo)
-		VALUES ($1, 'topup', $2, $3, 'Nạp tiền (mock)')
+		VALUES ($1, 'topup', $2, $3, 'Mock top-up')
 	`, userID, amountCents, newBal); err != nil {
 		return Wallet{}, err
 	}
@@ -340,6 +340,94 @@ func (s *Service) Transfer(
 		Message:         m,
 		Counterparty:    receiver,
 		Sender:          sender,
+	}, nil
+}
+
+// RedPocketOpen describes the outcome of the receiver "opening" a money
+// message. The money has already moved at transfer time; opening is purely a
+// celebratory reveal. The first open stamps opened_at; subsequent opens just
+// return the existing state (AlreadyOpen=true) and do not re-emit a WS event.
+type RedPocketOpen struct {
+	MessageID      uuid.UUID    `json:"message_id"`
+	AmountCents    int64        `json:"amount_cents"`
+	OpenedAt       time.Time    `json:"opened_at"`
+	AlreadyOpened  bool         `json:"already_opened"`
+	Sender         Counterparty `json:"sender"`
+	Memo           string       `json:"memo,omitempty"`
+	ConversationID uuid.UUID    `json:"conversation_id"`
+}
+
+var ErrPocketNotFound = errors.New("red pocket not found")
+
+// OpenRedPocket marks the receiver-side wallet_transactions row as opened
+// (idempotent) and returns enough info for the reveal animation.
+func (s *Service) OpenRedPocket(
+	ctx context.Context, userID, msgID uuid.UUID,
+) (RedPocketOpen, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return RedPocketOpen{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		txnID     uuid.UUID
+		amount    int64
+		opened    *time.Time
+		senderID  uuid.UUID
+		senderNm  string
+		senderAv  string
+		memo      string
+		convID    uuid.UUID
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT wt.id, wt.amount_cents, wt.opened_at,
+		       wt.counterparty_id, u.display_name, COALESCE(u.avatar_url,''),
+		       COALESCE(wt.memo,''), m.conversation_id
+		FROM wallet_transactions wt
+		JOIN users u ON u.id = wt.counterparty_id
+		JOIN messages m ON m.id = wt.related_message_id
+		WHERE wt.user_id = $1
+		  AND wt.related_message_id = $2
+		  AND wt.type = 'transfer_in'
+	`, userID, msgID).Scan(&txnID, &amount, &opened, &senderID, &senderNm, &senderAv, &memo, &convID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RedPocketOpen{}, ErrPocketNotFound
+	}
+	if err != nil {
+		return RedPocketOpen{}, err
+	}
+
+	already := opened != nil
+	var openedAt time.Time
+	if already {
+		openedAt = *opened
+	} else {
+		if err := tx.QueryRow(ctx, `
+			UPDATE wallet_transactions SET opened_at = NOW()
+			WHERE id = $1
+			RETURNING opened_at
+		`, txnID).Scan(&openedAt); err != nil {
+			return RedPocketOpen{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return RedPocketOpen{}, err
+	}
+
+	return RedPocketOpen{
+		MessageID:      msgID,
+		AmountCents:    amount,
+		OpenedAt:       openedAt,
+		AlreadyOpened:  already,
+		ConversationID: convID,
+		Memo:           memo,
+		Sender: Counterparty{
+			ID:          senderID,
+			DisplayName: senderNm,
+			AvatarURL:   senderAv,
+		},
 	}, nil
 }
 

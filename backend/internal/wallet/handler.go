@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/a1234/zalo-clone/backend/internal/httpx"
@@ -164,6 +165,49 @@ func (h *Handler) Transfer(w http.ResponseWriter, r *http.Request) {
 		ConversationID:  res.ConversationID,
 		NewBalanceCents: res.NewBalanceCents,
 	})
+}
+
+// OpenRedPocket: receiver claims the visual reveal for a money message they
+// received. Idempotent. On first open, broadcasts money.opened to both sides
+// so the sender's chat UI can update from "Đã gửi" to "Đã được mở".
+func (h *Handler) OpenRedPocket(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFrom(r.Context())
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "no user")
+		return
+	}
+	raw := chi.URLParam(r, "msgID")
+	msgID, err := uuid.Parse(raw)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid message id")
+		return
+	}
+	res, err := h.svc.OpenRedPocket(r.Context(), uid, msgID)
+	if err != nil {
+		if errors.Is(err, ErrPocketNotFound) {
+			httpx.Error(w, http.StatusNotFound, "red pocket not found")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if h.hub != nil && !res.AlreadyOpened {
+		// Tell the whole conversation (both sides) that the pocket is open;
+		// chat UIs can flip the closed envelope to the opened state without
+		// a full reload.
+		h.hub.BroadcastToConversation(r.Context(), res.ConversationID, ws.Event{
+			Type: "money.opened",
+			Payload: map[string]any{
+				"message_id":      res.MessageID,
+				"conversation_id": res.ConversationID,
+				"opened_at":       res.OpenedAt,
+				"by_user_id":      uid,
+			},
+		})
+	}
+
+	httpx.JSON(w, http.StatusOK, res)
 }
 
 func writeWalletErr(w http.ResponseWriter, err error) {

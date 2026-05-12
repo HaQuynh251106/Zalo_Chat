@@ -181,7 +181,13 @@ func (s *Service) listFiltered(
 		           AND mm.created_at > COALESCE(m.last_read_at, 'epoch'::timestamptz)
 		           AND mm.sender_id <> $1
 		       ) AS unread,
-		       (m.hidden_at IS NOT NULL) AS is_hidden
+		       (m.hidden_at IS NOT NULL) AS is_hidden,
+		       COALESCE(
+		         (SELECT ARRAY_AGG(cm2.user_id)
+		            FROM conversation_members cm2
+		           WHERE cm2.conversation_id = c.id),
+		         ARRAY[]::uuid[]
+		       ) AS member_ids
 		FROM conversations c
 		JOIN conversation_members m ON m.conversation_id = c.id
 		WHERE m.user_id = $1
@@ -196,7 +202,7 @@ func (s *Service) listFiltered(
 	out := make([]Conversation, 0)
 	for rows.Next() {
 		var c Conversation
-		if err := rows.Scan(&c.ID, &c.Type, &c.Title, &c.AvatarURL, &c.CreatedAt, &c.LastMsgAt, &c.LastMsg, &c.UnreadCnt, &c.IsHidden); err != nil {
+		if err := rows.Scan(&c.ID, &c.Type, &c.Title, &c.AvatarURL, &c.CreatedAt, &c.LastMsgAt, &c.LastMsg, &c.UnreadCnt, &c.IsHidden, &c.MemberIDs); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

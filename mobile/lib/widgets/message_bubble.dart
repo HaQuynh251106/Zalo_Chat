@@ -12,6 +12,11 @@ class MessageBubble extends StatelessWidget {
   final bool showTail;
   final bool seen;
   final VoidCallback? onLongPress;
+  // For money / red-pocket messages we want the open-overlay to greet the
+  // receiver with the sender's name + avatar. In a direct chat that's just
+  // the peer (passed from ChatScreen.title / peerAvatar).
+  final String? peerName;
+  final String? peerAvatar;
 
   const MessageBubble({
     super.key,
@@ -20,16 +25,20 @@ class MessageBubble extends StatelessWidget {
     this.showTail = true,
     this.seen = false,
     this.onLongPress,
+    this.peerName,
+    this.peerAvatar,
   });
 
   @override
   Widget build(BuildContext context) {
-    // Money messages get their own gold/amber card.
+    // Money / red-pocket messages get their own card.
     if (message.isMoney) {
       return MoneyMessageBubble(
         message: message,
         mine: mine,
         onLongPress: onLongPress,
+        peerName: peerName,
+        peerAvatar: peerAvatar,
       );
     }
     final df = DateFormat('HH:mm');
@@ -86,7 +95,7 @@ class MessageBubble extends StatelessWidget {
         : isAudio
             ? AudioMessageBubble(url: message.mediaUrl, mine: mine)
             : Text(
-                isRecalled ? 'Tin nhắn đã được thu hồi' : message.body,
+                isRecalled ? 'Message recalled' : message.body,
                 style: TextStyle(
                   color: isRecalled
                       ? (mine ? Colors.white70 : AppPalette.textSecondary)

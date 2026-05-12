@@ -26,6 +26,7 @@ type Message struct {
 	Reactions        []Reaction `json:"reactions,omitempty"`
 	MoneyAmountCents *int64     `json:"money_amount_cents,omitempty"`
 	MoneyTxnID       *uuid.UUID `json:"money_txn_id,omitempty"`
+	MoneyOpenedAt    *time.Time `json:"money_opened_at,omitempty"`
 }
 
 type Reaction struct {
@@ -89,7 +90,7 @@ func (s *Service) Send(ctx context.Context, conv, sender uuid.UUID, msgType, bod
 		SELECT i.id, i.conversation_id, i.sender_id, i.type, i.body, COALESCE(i.media_url,''),
 		       i.reply_to_id, i.recalled, i.pinned_at, i.created_at,
 		       COALESCE(
-		           CASE WHEN rep.recalled THEN '[đã thu hồi]'
+		           CASE WHEN rep.recalled THEN '[recalled]'
 		                WHEN rep.type = 'text' THEN LEFT(rep.body, 80)
 		                ELSE '['||rep.type||']' END, '') AS reply_snippet,
 		       rep.sender_id AS reply_sender
@@ -139,11 +140,14 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		       CASE WHEN m.recalled THEN '' ELSE m.body END,
 		       COALESCE(m.media_url,''), m.reply_to_id, m.recalled, m.pinned_at, m.created_at,
 		       COALESCE(
-		           CASE WHEN rep.recalled THEN '[đã thu hồi]'
+		           CASE WHEN rep.recalled THEN '[recalled]'
 		                WHEN rep.type = 'text' THEN LEFT(rep.body, 80)
 		                ELSE '['||rep.type||']' END, '') AS reply_snippet,
 		       rep.sender_id AS reply_sender,
-		       m.money_amount_cents, m.money_txn_id
+		       m.money_amount_cents, m.money_txn_id,
+		       (SELECT wt.opened_at FROM wallet_transactions wt
+		          WHERE wt.related_message_id = m.id AND wt.type='transfer_in'
+		          LIMIT 1) AS money_opened_at
 		FROM messages m
 		LEFT JOIN messages rep ON rep.id = m.reply_to_id
 		WHERE m.conversation_id = $1
@@ -168,7 +172,7 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Body, &m.MediaURL,
 			&m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender,
-			&m.MoneyAmountCents, &m.MoneyTxnID); err != nil {
+			&m.MoneyAmountCents, &m.MoneyTxnID, &m.MoneyOpenedAt); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)
@@ -218,7 +222,7 @@ func (s *Service) InsertMoneyMessageTx(
 	memo string,
 ) (Message, error) {
 	body := memo
-	preview := "[Tiền]"
+	preview := "[Money]"
 	var m Message
 	err := tx.QueryRow(ctx, `
 		INSERT INTO messages
@@ -314,13 +318,16 @@ func (s *Service) ListPinned(ctx context.Context, conv, requester uuid.UUID) ([]
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, conversation_id, sender_id, type,
-		       CASE WHEN recalled THEN '' ELSE body END,
-		       COALESCE(media_url,''), reply_to_id, recalled, pinned_at, created_at,
-		       money_amount_cents, money_txn_id
-		FROM messages
-		WHERE conversation_id = $1 AND pinned_at IS NOT NULL
-		ORDER BY pinned_at DESC
+		SELECT m.id, m.conversation_id, m.sender_id, m.type,
+		       CASE WHEN m.recalled THEN '' ELSE m.body END,
+		       COALESCE(m.media_url,''), m.reply_to_id, m.recalled, m.pinned_at, m.created_at,
+		       m.money_amount_cents, m.money_txn_id,
+		       (SELECT wt.opened_at FROM wallet_transactions wt
+		          WHERE wt.related_message_id = m.id AND wt.type='transfer_in'
+		          LIMIT 1) AS money_opened_at
+		FROM messages m
+		WHERE m.conversation_id = $1 AND m.pinned_at IS NOT NULL
+		ORDER BY m.pinned_at DESC
 	`, conv)
 	if err != nil {
 		return nil, err
@@ -331,7 +338,7 @@ func (s *Service) ListPinned(ctx context.Context, conv, requester uuid.UUID) ([]
 		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type,
 			&m.Body, &m.MediaURL, &m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt,
-			&m.MoneyAmountCents, &m.MoneyTxnID); err != nil {
+			&m.MoneyAmountCents, &m.MoneyTxnID, &m.MoneyOpenedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -357,7 +364,7 @@ func (s *Service) Recall(ctx context.Context, msgID, requester uuid.UUID) (uuid.
 	}
 	_, err = s.pool.Exec(ctx, `
 		UPDATE conversations
-		SET last_message_preview = 'Tin nhắn đã được thu hồi'
+		SET last_message_preview = 'Message recalled'
 		WHERE id = $1 AND last_message_at = $2
 	`, convID, createdAt)
 	if err != nil {

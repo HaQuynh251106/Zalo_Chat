@@ -170,6 +170,18 @@ class _ChatScreenState extends State<ChatScreen> {
             ));
       }
       _loadPinned();
+    } else if (t == 'money.opened') {
+      // The receiver tapped to open a Lì xì. Update the matching message
+      // bubble so the sender's UI flips from "Đang chờ mở" → "Đã được mở".
+      if (p['conversation_id'] != widget.conversationId) return;
+      final id = p['message_id'] as String?;
+      final openedAt = DateTime.tryParse(p['opened_at'] as String? ?? '');
+      if (id == null || openedAt == null) return;
+      final i = _messages.indexWhere((m) => m.id == id);
+      if (i >= 0) {
+        setState(() => _messages[i] =
+            _messages[i].copyWith(moneyOpenedAt: openedAt));
+      }
     }
   }
 
@@ -286,7 +298,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _friendlyError(Object e) {
     final s = e.toString();
     if (s.contains('BLOCKED') || s.contains('blocked')) {
-      return 'Bạn không thể gửi tin nhắn tới người này';
+      return 'You cannot send messages to this user';
     }
     return s;
   }
@@ -365,7 +377,7 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'copy':
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Đã sao chép'), duration: Duration(seconds: 1)),
+              content: Text('Copied'), duration: Duration(seconds: 1)),
         );
         break;
     }
@@ -386,7 +398,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (m.mediaUrl.isNotEmpty) 'media_url': m.mediaUrl,
       });
       messenger.showSnackBar(
-        SnackBar(content: Text('Đã chuyển tiếp tới ${target.title}')),
+        SnackBar(content: Text('Forwarded to ${target.title}')),
       );
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(_friendlyError(e))));
@@ -439,7 +451,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // Both are fetchable via http to obtain bytes.
       final res = await http.get(Uri.parse(pathOrUrl));
       if (res.statusCode != 200) {
-        throw 'Không đọc được audio (HTTP ${res.statusCode})';
+        throw 'Could not read audio (HTTP ${res.statusCode})';
       }
       final filename = 'voice_${DateTime.now().millisecondsSinceEpoch}.webm';
       final uploaded = await api.upload(
@@ -461,7 +473,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _openMoneyTransfer() async {
     if (widget.peerId == null || widget.isGroup) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Chuyển tiền hiện chỉ hỗ trợ chat 1-1')),
+        const SnackBar(
+          content: Text('Money transfer is available for direct chats only'),
+        ),
       );
       return;
     }
@@ -483,12 +497,10 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       if (_blocked) {
         await api.post('/users/unblock', body: {'user_id': widget.peerId});
-        messenger.showSnackBar(
-            const SnackBar(content: Text('Đã bỏ chặn người dùng')));
+        messenger.showSnackBar(const SnackBar(content: Text('User unblocked')));
       } else {
         await api.post('/users/block', body: {'user_id': widget.peerId});
-        messenger
-            .showSnackBar(const SnackBar(content: Text('Đã chặn người dùng')));
+        messenger.showSnackBar(const SnackBar(content: Text('User blocked')));
       }
       setState(() => _blocked = !_blocked);
     } catch (e) {
@@ -510,7 +522,8 @@ class _ChatScreenState extends State<ChatScreen> {
           body: {'until': until});
       setState(() => _muted = !_muted);
       messenger.showSnackBar(SnackBar(
-          content: Text(_muted ? 'Đã tắt thông báo' : 'Đã bật thông báo lại')));
+          content:
+              Text(_muted ? 'Notifications muted' : 'Notifications enabled')));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
     }
@@ -598,7 +611,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       children: [
                         TypingDots(),
                         SizedBox(width: 8),
-                        Text('Đang nhập...',
+                        Text('Typing...',
                             style: TextStyle(
                                 color: AppPalette.textSecondary, fontSize: 12)),
                       ],
@@ -645,7 +658,7 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Padding(
           padding: const EdgeInsets.all(40),
           child: Text(
-            'Không tìm thấy tin nhắn nào khớp “$_searchQuery”',
+            'No messages match "$_searchQuery"',
             textAlign: TextAlign.center,
             style: const TextStyle(color: AppPalette.textSecondary),
           ),
@@ -671,7 +684,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: AppPalette.indigo),
                     )
-                  : const Text('— Hết lịch sử —',
+                  : const Text('- End of history -',
                       style: TextStyle(
                           color: AppPalette.textSecondary, fontSize: 11)),
             ),
@@ -717,6 +730,8 @@ class _ChatScreenState extends State<ChatScreen> {
               showTail: showTail,
               seen: seen,
               onLongPress: () => _onBubbleLongPress(m),
+              peerName: widget.title,
+              peerAvatar: widget.peerAvatar,
             ),
           ],
         );
@@ -728,9 +743,8 @@ class _ChatScreenState extends State<ChatScreen> {
       a.year == b.year && a.month == b.month && a.day == b.day;
 
   Widget _pinnedBanner(Message m) {
-    final preview = m.recalled
-        ? '[đã thu hồi]'
-        : (m.type == 'text' ? m.body : '[${m.type}]');
+    final preview =
+        m.recalled ? '[recalled]' : (m.type == 'text' ? m.body : '[${m.type}]');
     return Container(
       decoration: BoxDecoration(
         color: AppPalette.coral.withValues(alpha: 0.08),
@@ -758,7 +772,7 @@ class _ChatScreenState extends State<ChatScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text(
-                  'Tin nhắn ghim',
+                  'Pinned Message',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -779,7 +793,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           IconButton(
-            tooltip: 'Bỏ ghim',
+            tooltip: 'Unpin',
             icon: const Icon(Icons.close,
                 size: 18, color: AppPalette.textSecondary),
             onPressed: () => _togglePin(m),
@@ -805,7 +819,7 @@ class _ChatScreenState extends State<ChatScreen> {
               autofocus: true,
               onChanged: (v) => setState(() => _searchQuery = v),
               decoration: const InputDecoration(
-                hintText: 'Tìm trong cuộc trò chuyện này...',
+                hintText: 'Search this chat...',
                 border: InputBorder.none,
                 contentPadding: EdgeInsets.symmetric(vertical: 8),
               ),
@@ -927,12 +941,10 @@ class _ChatAppBar extends StatelessWidget {
                         const SizedBox(height: 2),
                         Text(
                           typing
-                              ? 'Đang soạn tin...'
+                              ? 'Typing...'
                               : (isGroup
-                                  ? 'Nhấn để xem thành viên'
-                                  : (online
-                                      ? 'Đang hoạt động'
-                                      : 'Ngoại tuyến')),
+                                  ? 'Tap to view members'
+                                  : (online ? 'Online' : 'Offline')),
                           style: TextStyle(
                             fontSize: 11,
                             color: typing
@@ -952,18 +964,18 @@ class _ChatAppBar extends StatelessWidget {
               ),
               _AppBarIconBtn(
                 icon: Icons.call_outlined,
-                tooltip: 'Gọi thoại',
+                tooltip: 'Voice Call',
                 onPressed: onVoiceCall,
               ),
               _AppBarIconBtn(
                 icon: Icons.videocam_outlined,
-                tooltip: 'Gọi video',
+                tooltip: 'Video Call',
                 onPressed: onVideoCall,
               ),
               PopupMenuButton<String>(
                 icon:
                     const Icon(Icons.more_vert, color: AppPalette.textPrimary),
-                tooltip: 'Tuỳ chọn',
+                tooltip: 'Options',
                 padding: EdgeInsets.zero,
                 onSelected: (v) {
                   if (v == 'search') onToggleSearch();
@@ -978,7 +990,7 @@ class _ChatAppBar extends StatelessWidget {
                         Icon(Icons.search,
                             size: 18, color: AppPalette.textPrimary),
                         SizedBox(width: 10),
-                        Text('Tìm tin nhắn'),
+                        Text('Search Messages'),
                       ],
                     ),
                   ),
@@ -993,7 +1005,9 @@ class _ChatAppBar extends StatelessWidget {
                             size: 18,
                             color: AppPalette.textPrimary),
                         const SizedBox(width: 10),
-                        Text(muted ? 'Bật thông báo' : 'Tắt thông báo'),
+                        Text(muted
+                            ? 'Unmute Notifications'
+                            : 'Mute Notifications'),
                       ],
                     ),
                   ),
@@ -1007,7 +1021,7 @@ class _ChatAppBar extends StatelessWidget {
                               color: blocked ? AppPalette.indigo : Colors.red),
                           const SizedBox(width: 10),
                           Text(
-                            blocked ? 'Bỏ chặn người dùng' : 'Chặn người dùng',
+                            blocked ? 'Unblock User' : 'Block User',
                             style: TextStyle(
                               color: blocked ? AppPalette.indigo : Colors.red,
                             ),
@@ -1114,7 +1128,7 @@ class _Composer extends StatelessWidget {
                         minLines: 1,
                         maxLines: 5,
                         decoration: const InputDecoration(
-                          hintText: 'Nhắn gì đó dễ thương...',
+                          hintText: 'Type a message...',
                           filled: false,
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
@@ -1182,7 +1196,7 @@ class _ReplyPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final body = message.recalled
-        ? '[đã thu hồi]'
+        ? '[recalled]'
         : (message.type == 'text' ? message.body : '[${message.type}]');
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
@@ -1211,7 +1225,7 @@ class _ReplyPreview extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text(
-                  'Đang trả lời',
+                  'Replying',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -1266,10 +1280,10 @@ class _EmptyChat extends StatelessWidget {
             child: const Icon(Icons.waving_hand, color: Colors.white, size: 34),
           ),
           const SizedBox(height: 14),
-          const Text('Hãy gửi lời chào!',
+          const Text('Say hello!',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
           const SizedBox(height: 6),
-          const Text('Giữ vào tin nhắn để thả cảm xúc',
+          const Text('Long-press a message to react',
               style: TextStyle(color: AppPalette.textSecondary, fontSize: 12)),
         ],
       ),
