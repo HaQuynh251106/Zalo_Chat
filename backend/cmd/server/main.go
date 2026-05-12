@@ -37,6 +37,12 @@ func main() {
 	}
 	defer pool.Close()
 
+	migrations, err := db.ApplyMigrations(ctx, pool, "./migrations")
+	if err != nil {
+		log.Fatalf("migrations: %v", err)
+	}
+	log.Printf("[migrate] done: applied=%d skipped=%d", migrations.Applied, migrations.Skipped)
+
 	rdb, err := db.NewRedis(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	if err != nil {
 		log.Printf("[warn] redis unavailable: %v (continuing without presence cache)", err)

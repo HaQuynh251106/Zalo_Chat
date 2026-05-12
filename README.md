@@ -105,6 +105,12 @@ go run ./cmd/server
 
 Healthcheck: `curl http://localhost:8080/healthz`
 
+### Database migrations
+
+Backend startup applies `backend/migrations/*.sql` in filename order and records each file in `schema_migrations`.
+Already-applied files are skipped when their checksum matches; changed historical migrations fail fast.
+You can also run migrations manually with `cd backend && ./scripts/migrate.sh`.
+
 ### Flutter
 
 ```bash
