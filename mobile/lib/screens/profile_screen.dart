@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import '../services/api_client.dart';
 import '../theme.dart';
+import '../widgets/pin_dialog.dart';
 import '../widgets/user_avatar.dart';
 import 'devices_screen.dart';
 import 'edit_profile_screen.dart';
+import 'hidden_chats_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -88,6 +91,10 @@ class ProfileScreen extends StatelessWidget {
                 ));
               }),
               _tile(Icons.lock_outline, 'Bảo mật & quyền riêng tư'),
+              _tile(Icons.visibility_off_outlined, 'Trò chuyện ẩn',
+                  trailing: const Icon(Icons.lock,
+                      size: 14, color: AppPalette.indigo),
+                  onTap: () => _openHidden(context)),
               _tile(Icons.devices_other_outlined, 'Thiết bị đang đăng nhập',
                   onTap: () {
                 Navigator.of(context).push(MaterialPageRoute(
@@ -115,6 +122,134 @@ class ProfileScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _openHidden(BuildContext context) async {
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final st = await api.get('/me/hide-pin') as Map<String, dynamic>;
+      final hasPin = (st['has_pin'] ?? false) as bool;
+      if (!hasPin) {
+        if (!context.mounted) return;
+        final created = await PinDialog.show(
+          context,
+          mode: PinDialogMode.setup,
+          title: 'Thiết lập mã PIN ẩn',
+          subtitle:
+              'Bạn chưa có PIN. Đặt PIN để có thể ẩn cuộc trò chuyện riêng tư.',
+        );
+        if (created == null || !context.mounted) return;
+        await api.post('/me/hide-pin', body: {'new_pin': created['pin']});
+        messenger.showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Đã đặt PIN ẩn. Hãy giữ vào cuộc trò chuyện để ẩn nó.')),
+        );
+        return;
+      }
+      if (!context.mounted) return;
+      // Choose: view or change PIN
+      final action = await showModalBottomSheet<String>(
+        context: context,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 10),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppPalette.divider,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                leading:
+                    const Icon(Icons.visibility, color: AppPalette.indigo),
+                title: const Text('Xem trò chuyện ẩn'),
+                subtitle: const Text('Nhập PIN để mở khoá danh sách'),
+                onTap: () => Navigator.pop(context, 'view'),
+              ),
+              ListTile(
+                leading:
+                    const Icon(Icons.password, color: AppPalette.violet),
+                title: const Text('Đổi mã PIN'),
+                subtitle: const Text('Yêu cầu PIN hiện tại'),
+                onTap: () => Navigator.pop(context, 'change'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      );
+      if (!context.mounted) return;
+      if (action == 'view') {
+        await _viewHidden(context, api);
+      } else if (action == 'change') {
+        await _changePin(context, api);
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _viewHidden(BuildContext context, ApiClient api) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+    final res = await PinDialog.show(
+      context,
+      mode: PinDialogMode.verify,
+      title: 'Trò chuyện ẩn',
+      subtitle: 'Nhập PIN để xem các cuộc trò chuyện đã ẩn.',
+    );
+    if (res == null) return;
+    try {
+      await api.post('/me/hide-pin/verify', body: {'pin': res['pin']});
+      nav.push(MaterialPageRoute(
+        builder: (_) => HiddenChatsScreen(pin: res['pin']!),
+      ));
+    } catch (e) {
+      final msg = e.toString();
+      messenger.showSnackBar(SnackBar(
+        content: Text(
+            msg.contains('wrong pin') ? 'Mã PIN không đúng' : '$e'),
+      ));
+    }
+  }
+
+  Future<void> _changePin(BuildContext context, ApiClient api) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final res = await PinDialog.show(
+      context,
+      mode: PinDialogMode.change,
+      title: 'Đổi mã PIN',
+      subtitle: 'PIN mới sẽ thay thế PIN cũ.',
+    );
+    if (res == null) return;
+    try {
+      await api.post('/me/hide-pin', body: {
+        'old_pin': res['old_pin'],
+        'new_pin': res['pin'],
+      });
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Đã đổi mã PIN')),
+      );
+    } catch (e) {
+      final msg = e.toString();
+      messenger.showSnackBar(SnackBar(
+        content: Text(msg.contains('wrong current pin')
+            ? 'PIN hiện tại không đúng'
+            : msg.contains('pin must')
+                ? 'PIN phải 4-12 chữ số'
+                : '$e'),
+      ));
+    }
   }
 
   Widget _section(String title, List<Widget> children) {

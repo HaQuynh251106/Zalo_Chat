@@ -21,6 +21,7 @@ type Message struct {
 	ReplyToSnippet string     `json:"reply_to_snippet,omitempty"`
 	ReplyToSender  *uuid.UUID `json:"reply_to_sender,omitempty"`
 	Recalled       bool       `json:"recalled"`
+	PinnedAt       *time.Time `json:"pinned_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	Reactions      []Reaction `json:"reactions,omitempty"`
 }
@@ -81,10 +82,10 @@ func (s *Service) Send(ctx context.Context, conv, sender uuid.UUID, msgType, bod
 		WITH inserted AS (
 		    INSERT INTO messages (conversation_id, sender_id, type, body, media_url, reply_to_id)
 		    VALUES ($1,$2,$3,$4,NULLIF($5,''),$6)
-		    RETURNING id, conversation_id, sender_id, type, body, media_url, reply_to_id, recalled, created_at
+		    RETURNING id, conversation_id, sender_id, type, body, media_url, reply_to_id, recalled, pinned_at, created_at
 		)
 		SELECT i.id, i.conversation_id, i.sender_id, i.type, i.body, COALESCE(i.media_url,''),
-		       i.reply_to_id, i.recalled, i.created_at,
+		       i.reply_to_id, i.recalled, i.pinned_at, i.created_at,
 		       COALESCE(
 		           CASE WHEN rep.recalled THEN '[đã thu hồi]'
 		                WHEN rep.type = 'text' THEN LEFT(rep.body, 80)
@@ -94,7 +95,7 @@ func (s *Service) Send(ctx context.Context, conv, sender uuid.UUID, msgType, bod
 		LEFT JOIN messages rep ON rep.id = i.reply_to_id
 	`, conv, sender, msgType, body, mediaURL, replyTo).Scan(
 		&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Body, &m.MediaURL, &m.ReplyToID,
-		&m.Recalled, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender,
+		&m.Recalled, &m.PinnedAt, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender,
 	)
 	if err != nil {
 		return Message{}, err
@@ -130,11 +131,11 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
-	args := []any{conv, limit}
+	args := []any{conv, limit, requester}
 	q := `
 		SELECT m.id, m.conversation_id, m.sender_id, m.type,
 		       CASE WHEN m.recalled THEN '' ELSE m.body END,
-		       COALESCE(m.media_url,''), m.reply_to_id, m.recalled, m.created_at,
+		       COALESCE(m.media_url,''), m.reply_to_id, m.recalled, m.pinned_at, m.created_at,
 		       COALESCE(
 		           CASE WHEN rep.recalled THEN '[đã thu hồi]'
 		                WHEN rep.type = 'text' THEN LEFT(rep.body, 80)
@@ -143,9 +144,11 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		FROM messages m
 		LEFT JOIN messages rep ON rep.id = m.reply_to_id
 		WHERE m.conversation_id = $1
+		  AND NOT EXISTS (SELECT 1 FROM message_hides h
+		                  WHERE h.message_id = m.id AND h.user_id = $3)
 	`
 	if before != nil {
-		q += " AND m.created_at < $3"
+		q += " AND m.created_at < $4"
 		args = append(args, *before)
 	}
 	q += " ORDER BY m.created_at DESC LIMIT $2"
@@ -161,7 +164,7 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Body, &m.MediaURL,
-			&m.ReplyToID, &m.Recalled, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender); err != nil {
+			&m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)
@@ -196,6 +199,98 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		}
 	}
 	return msgs, nil
+}
+
+// SetPin toggles pinned state. Caller must be a conversation member.
+// Returns conversation id for ws fan-out.
+func (s *Service) SetPin(ctx context.Context, msgID, requester uuid.UUID, pin bool) (uuid.UUID, error) {
+	var conv uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT m.conversation_id
+		FROM messages m
+		JOIN conversation_members cm
+		  ON cm.conversation_id = m.conversation_id AND cm.user_id = $2
+		WHERE m.id = $1
+	`, msgID, requester).Scan(&conv)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotMember
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	var sql string
+	if pin {
+		sql = `UPDATE messages SET pinned_at=NOW() WHERE id=$1`
+	} else {
+		sql = `UPDATE messages SET pinned_at=NULL WHERE id=$1`
+	}
+	if _, err := s.pool.Exec(ctx, sql, msgID); err != nil {
+		return uuid.Nil, err
+	}
+	return conv, nil
+}
+
+// HideForMe inserts a per-user hide record. The message stays visible
+// to other members. Idempotent.
+func (s *Service) HideForMe(ctx context.Context, msgID, user uuid.UUID) error {
+	// verify user belongs to conversation containing this message
+	var ok int
+	err := s.pool.QueryRow(ctx, `
+		SELECT 1
+		FROM messages m
+		JOIN conversation_members cm
+		  ON cm.conversation_id = m.conversation_id AND cm.user_id = $2
+		WHERE m.id = $1
+	`, msgID, user).Scan(&ok)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotMember
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO message_hides (message_id, user_id)
+		VALUES ($1, $2)
+		ON CONFLICT (message_id, user_id) DO NOTHING
+	`, msgID, user)
+	return err
+}
+
+// ListPinned returns all currently-pinned messages of a conversation,
+// newest pin first.
+func (s *Service) ListPinned(ctx context.Context, conv, requester uuid.UUID) ([]Message, error) {
+	var ok int
+	err := s.pool.QueryRow(ctx,
+		`SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`,
+		conv, requester).Scan(&ok)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, conversation_id, sender_id, type,
+		       CASE WHEN recalled THEN '' ELSE body END,
+		       COALESCE(media_url,''), reply_to_id, recalled, pinned_at, created_at
+		FROM messages
+		WHERE conversation_id = $1 AND pinned_at IS NOT NULL
+		ORDER BY pinned_at DESC
+	`, conv)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Message, 0)
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type,
+			&m.Body, &m.MediaURL, &m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // Recall marks a message as recalled (only by sender, within 24h).

@@ -2,6 +2,13 @@ import 'package:flutter/material.dart';
 
 /// Modern, friendly palette intentionally distinct from Zalo's blue (#0084FF).
 /// Primary: Indigo → Violet gradient. Accent: warm Coral. Surface: soft cream.
+class AppLayout {
+  /// Max width of the chat content column on wide viewports.
+  static const double chatContentMaxWidth = 760;
+  /// Max width of a single message bubble, regardless of viewport.
+  static const double bubbleMaxWidth = 520;
+}
+
 class AppPalette {
   static const indigo = Color(0xFF6366F1);
   static const violet = Color(0xFF8B5CF6);

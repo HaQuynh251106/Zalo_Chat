@@ -6,6 +6,7 @@ class Conversation {
   final DateTime? lastMessageAt;
   final String lastMessagePreview;
   final int unreadCount;
+  final bool isHidden;
   final List<String>? memberIds;
 
   Conversation({
@@ -16,6 +17,7 @@ class Conversation {
     this.lastMessageAt,
     this.lastMessagePreview = '',
     this.unreadCount = 0,
+    this.isHidden = false,
     this.memberIds,
   });
 
@@ -29,6 +31,7 @@ class Conversation {
             : null,
         lastMessagePreview: (j['last_message'] ?? '') as String,
         unreadCount: (j['unread_count'] ?? 0) as int,
+        isHidden: (j['is_hidden'] ?? false) as bool,
         memberIds: (j['member_ids'] as List<dynamic>?)?.cast<String>(),
       );
 }

@@ -80,6 +80,78 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, list)
 }
 
+func (h *Handler) Pin(w http.ResponseWriter, r *http.Request) {
+	h.pinCommon(w, r, true)
+}
+
+func (h *Handler) Unpin(w http.ResponseWriter, r *http.Request) {
+	h.pinCommon(w, r, false)
+}
+
+func (h *Handler) pinCommon(w http.ResponseWriter, r *http.Request, pin bool) {
+	me, _ := middleware.UserIDFrom(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "msgID"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	convID, err := h.svc.SetPin(r.Context(), id, me, pin)
+	if err != nil {
+		if errors.Is(err, ErrNotMember) {
+			httpx.Error(w, http.StatusForbidden, "not a member")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.hub.BroadcastToConversation(r.Context(), convID, ws.Event{
+		Type: "message.pinned",
+		Payload: map[string]any{
+			"id":              id,
+			"conversation_id": convID,
+			"pinned":          pin,
+		},
+	})
+	httpx.JSON(w, http.StatusOK, map[string]bool{"pinned": pin})
+}
+
+func (h *Handler) HideForMe(w http.ResponseWriter, r *http.Request) {
+	me, _ := middleware.UserIDFrom(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "msgID"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.svc.HideForMe(r.Context(), id, me); err != nil {
+		if errors.Is(err, ErrNotMember) {
+			httpx.Error(w, http.StatusForbidden, "not a member")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "hidden"})
+}
+
+func (h *Handler) ListPinned(w http.ResponseWriter, r *http.Request) {
+	me, _ := middleware.UserIDFrom(r.Context())
+	conv, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	list, err := h.svc.ListPinned(r.Context(), conv, me)
+	if err != nil {
+		if errors.Is(err, ErrNotMember) {
+			httpx.Error(w, http.StatusForbidden, "not a member")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, list)
+}
+
 func (h *Handler) Recall(w http.ResponseWriter, r *http.Request) {
 	me, _ := middleware.UserIDFrom(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "msgID"))

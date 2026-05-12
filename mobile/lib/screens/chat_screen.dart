@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -11,22 +12,28 @@ import '../services/api_client.dart';
 import '../services/ws_client.dart';
 import '../theme.dart';
 import '../widgets/chat_background.dart';
+import '../widgets/forward_picker.dart';
+import '../widgets/message_action_sheet.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/typing_dots.dart';
 import '../widgets/user_avatar.dart';
+import '../widgets/voice_recorder.dart';
 import 'call_screen.dart';
+import 'group_info_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
   final String title;
   final String peerAvatar;
   final String? peerId;
+  final bool isGroup;
   const ChatScreen({
     super.key,
     required this.conversationId,
     required this.title,
     this.peerAvatar = '',
     this.peerId,
+    this.isGroup = false,
   });
 
   @override
@@ -41,7 +48,16 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _loading = true;
   bool _sentTyping = false;
   bool _peerOnline = false;
-  DateTime? _peerLastRead; // for read-receipt check on my messages
+  bool _muted = false;
+  bool _blocked = false;
+  bool _recording = false;
+  bool _loadingMore = false;
+  bool _hasMore = true;
+  bool _searching = false;
+  String _searchQuery = '';
+  Message? _replyingTo;
+  Message? _pinnedHead; // latest pinned message shown in banner
+  DateTime? _peerLastRead;
   late final WsClient _ws;
   String? _myId;
   Timer? _typingOffTimer;
@@ -53,7 +69,42 @@ class _ChatScreenState extends State<ChatScreen> {
     _ws = context.read<WsClient>();
     _myId = context.read<AuthProvider>().user?.id;
     _wsSub = _ws.events.listen(_onWs);
+    _scroll.addListener(_onScroll);
     _load();
+  }
+
+  void _onScroll() {
+    // List is reversed, so scrolling "up" visually = approaching maxScrollExtent.
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    if (pos.pixels > pos.maxScrollExtent - 240) {
+      _loadMore();
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore || _messages.isEmpty) return;
+    setState(() => _loadingMore = true);
+    try {
+      final oldest = _messages.last.createdAt.toUtc().toIso8601String();
+      final api = context.read<ApiClient>();
+      final data = await api.get(
+        '/conversations/${widget.conversationId}/messages',
+        query: {'limit': '30', 'before': oldest},
+      ) as List<dynamic>;
+      final older = data
+          .map((e) => Message.fromJson(e as Map<String, dynamic>))
+          .where((m) => !_messages.any((x) => x.id == m.id))
+          .toList();
+      setState(() {
+        _messages.addAll(older);
+        if (older.length < 30) _hasMore = false;
+      });
+    } catch (_) {
+      // silent fail; user can scroll again later
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
   }
 
   void _onWs(Map<String, dynamic> ev) {
@@ -65,25 +116,28 @@ class _ChatScreenState extends State<ChatScreen> {
       final incoming = Message.fromJson(p);
       if (_messages.any((m) => m.id == incoming.id)) return;
       setState(() => _messages.insert(0, incoming));
-      // auto mark-read if I'm viewing the chat
       _markRead();
     } else if (t == 'message.recalled') {
       if (p['conversation_id'] != widget.conversationId) return;
       final id = p['id'] as String;
       final i = _messages.indexWhere((m) => m.id == id);
       if (i >= 0) {
-        final old = _messages[i];
-        setState(() => _messages[i] = Message(
-              id: old.id,
-              conversationId: old.conversationId,
-              senderId: old.senderId,
-              type: old.type,
-              body: '',
-              mediaUrl: old.mediaUrl,
-              recalled: true,
-              createdAt: old.createdAt,
-            ));
+        setState(() => _messages[i] = _messages[i].copyWith(recalled: true, body: ''));
       }
+    } else if (t == 'message.reaction') {
+      if (p['conversation_id'] != widget.conversationId) return;
+      final msgId = p['message_id'] as String?;
+      final userId = p['user_id'] as String?;
+      final emoji = (p['emoji'] ?? '') as String;
+      if (msgId == null || userId == null) return;
+      final i = _messages.indexWhere((m) => m.id == msgId);
+      if (i < 0) return;
+      final current = List<MessageReaction>.from(_messages[i].reactions);
+      current.removeWhere((r) => r.userId == userId);
+      if (emoji.isNotEmpty) {
+        current.add(MessageReaction(userId: userId, emoji: emoji));
+      }
+      setState(() => _messages[i] = _messages[i].copyWith(reactions: current));
     } else if (t == 'typing') {
       if (p['conversation_id'] != widget.conversationId) return;
       final userId = p['user_id'] as String?;
@@ -102,6 +156,18 @@ class _ChatScreenState extends State<ChatScreen> {
       if (uid == _myId) return;
       final at = DateTime.tryParse(p['read_at'] as String? ?? '');
       if (at != null) setState(() => _peerLastRead = at);
+    } else if (t == 'message.pinned') {
+      if (p['conversation_id'] != widget.conversationId) return;
+      final id = p['id'] as String?;
+      final pinned = (p['pinned'] ?? false) as bool;
+      if (id == null) return;
+      final i = _messages.indexWhere((m) => m.id == id);
+      if (i >= 0) {
+        setState(() => _messages[i] = _messages[i].copyWith(
+              pinnedAt: pinned ? DateTime.now() : null,
+            ));
+      }
+      _loadPinned();
     }
   }
 
@@ -118,17 +184,27 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _load() async {
     try {
       final api = context.read<ApiClient>();
-      final data =
-          await api.get('/conversations/${widget.conversationId}/messages')
-              as List<dynamic>;
+      final data = await api.get(
+          '/conversations/${widget.conversationId}/messages',
+          query: {'limit': '30'}) as List<dynamic>;
       setState(() {
         _messages
           ..clear()
-          ..addAll(
-              data.map((e) => Message.fromJson(e as Map<String, dynamic>)));
+          ..addAll(data.map((e) => Message.fromJson(e as Map<String, dynamic>)));
+        _hasMore = data.length >= 30;
         _loading = false;
       });
       _markRead();
+      _loadPinned();
+      // Hydrate block state for direct chats.
+      if (widget.peerId != null) {
+        try {
+          final blocked = await api.get('/users/blocked') as List<dynamic>;
+          if (!mounted) return;
+          setState(() => _blocked = blocked
+              .any((u) => (u as Map<String, dynamic>)['id'] == widget.peerId));
+        } catch (_) {}
+      }
     } catch (_) {
       setState(() => _loading = false);
     }
@@ -141,21 +217,75 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {}
   }
 
+  Future<void> _loadPinned() async {
+    try {
+      final api = context.read<ApiClient>();
+      final data = await api
+          .get('/conversations/${widget.conversationId}/pinned') as List<dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _pinnedHead = data.isEmpty
+            ? null
+            : Message.fromJson(data.first as Map<String, dynamic>);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _togglePin(Message m) async {
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await api.post(m.isPinned
+          ? '/messages/${m.id}/unpin'
+          : '/messages/${m.id}/pin');
+      // optimistic: server will broadcast message.pinned and we'll refresh.
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _hideForMe(Message m) async {
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    // optimistic local hide
+    setState(() => _messages.removeWhere((x) => x.id == m.id));
+    try {
+      await api.post('/messages/${m.id}/hide');
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+      _load();
+    }
+  }
+
   Future<void> _send() async {
     final body = _input.text.trim();
     if (body.isEmpty) return;
     _input.clear();
+    final replyTo = _replyingTo?.id;
+    setState(() => _replyingTo = null);
     final api = context.read<ApiClient>();
     final messenger = ScaffoldMessenger.of(context);
     try {
       await api.post(
         '/conversations/${widget.conversationId}/messages',
-        body: {'type': 'text', 'body': body},
+        body: {
+          'type': 'text',
+          'body': body,
+          if (replyTo != null) 'reply_to_id': replyTo,
+        },
       );
       _sendTyping(false);
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('$e')));
+      messenger.showSnackBar(SnackBar(content: Text(_friendlyError(e))));
     }
+  }
+
+  String _friendlyError(Object e) {
+    final s = e.toString();
+    if (s.contains('BLOCKED') || s.contains('blocked')) {
+      return 'Bạn không thể gửi tin nhắn tới người này';
+    }
+    return s;
   }
 
   Future<void> _attachImage() async {
@@ -169,19 +299,19 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await picked.readAsBytes();
       final res = await api.upload(bytes: bytes, filename: picked.name);
       final mediaUrl = _absUrl((res['url'] ?? res['path']) as String);
-      await api.post('/conversations/${widget.conversationId}/messages', body: {
+      await api
+          .post('/conversations/${widget.conversationId}/messages', body: {
         'type': 'image',
         'body': '',
         'media_url': mediaUrl,
       });
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('$e')));
+      messenger.showSnackBar(SnackBar(content: Text(_friendlyError(e))));
     }
   }
 
-  String _absUrl(String pathOrUrl) => pathOrUrl.startsWith('http')
-      ? pathOrUrl
-      : '${AppConfig.apiBase}$pathOrUrl';
+  String _absUrl(String pathOrUrl) =>
+      pathOrUrl.startsWith('http') ? pathOrUrl : '${AppConfig.apiBase}$pathOrUrl';
 
   void _handleInputChanged(String value) {
     if (value.trim().isEmpty) {
@@ -202,32 +332,158 @@ class _ChatScreenState extends State<ChatScreen> {
         {'conversation_id': widget.conversationId, 'is_typing': isTyping});
   }
 
-  Future<void> _recall(Message m) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Thu hồi tin nhắn?'),
-        content:
-            const Text('Tin nhắn sẽ bị xoá ở cả 2 phía. Không thể hoàn tác.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Huỷ')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Thu hồi'),
-          ),
-        ],
-      ),
+  Future<void> _onBubbleLongPress(Message m) async {
+    final mine = m.senderId == _myId;
+    final result = await MessageActionSheet.show(
+      context,
+      message: m,
+      mine: mine,
     );
-    if (confirm != true) return;
-    if (!mounted) return;
+    if (result == null || !mounted) return;
+    switch (result.key) {
+      case 'react':
+        await _react(m, result.value ?? '');
+        break;
+      case 'reply':
+        setState(() => _replyingTo = m);
+        break;
+      case 'forward':
+        await _forward(m);
+        break;
+      case 'pin':
+        await _togglePin(m);
+        break;
+      case 'hide':
+        await _hideForMe(m);
+        break;
+      case 'recall':
+        await _recall(m);
+        break;
+      case 'copy':
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã sao chép'), duration: Duration(seconds: 1)),
+        );
+        break;
+    }
+  }
+
+  Future<void> _forward(Message m) async {
+    final target = await ForwardPicker.show(
+      context,
+      excludeConversationId: widget.conversationId,
+    );
+    if (target == null || !mounted) return;
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await api.post('/conversations/${target.id}/messages', body: {
+        'type': m.type,
+        'body': m.recalled ? '' : m.body,
+        if (m.mediaUrl.isNotEmpty) 'media_url': m.mediaUrl,
+      });
+      messenger.showSnackBar(
+        SnackBar(content: Text('Đã chuyển tiếp tới ${target.title}')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(_friendlyError(e))));
+    }
+  }
+
+  Future<void> _react(Message m, String emoji) async {
+    // Optimistic: update local then call API
+    final myId = _myId;
+    if (myId == null) return;
+    final current = List<MessageReaction>.from(m.reactions);
+    final existing = current.indexWhere((r) => r.userId == myId);
+    final isSameEmoji = existing >= 0 && current[existing].emoji == emoji;
+    final newEmoji = isSameEmoji ? '' : emoji;
+    if (existing >= 0) current.removeAt(existing);
+    if (newEmoji.isNotEmpty) {
+      current.add(MessageReaction(userId: myId, emoji: newEmoji));
+    }
+    final i = _messages.indexWhere((x) => x.id == m.id);
+    if (i >= 0) {
+      setState(() => _messages[i] = _messages[i].copyWith(reactions: current));
+    }
+    try {
+      await context
+          .read<ApiClient>()
+          .post('/messages/${m.id}/reactions', body: {'emoji': newEmoji});
+    } catch (e) {
+      // best-effort rollback by reload
+      _load();
+    }
+  }
+
+  Future<void> _recall(Message m) async {
     final api = context.read<ApiClient>();
     final messenger = ScaffoldMessenger.of(context);
     try {
       await api.post('/messages/${m.id}/recall');
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _sendVoice(String pathOrUrl, Duration duration) async {
+    setState(() => _recording = false);
+    if (duration.inMilliseconds < 500) return; // discard tap-too-short
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      // record returns blob:// URL on web and a real path on native.
+      // Both are fetchable via http to obtain bytes.
+      final res = await http.get(Uri.parse(pathOrUrl));
+      if (res.statusCode != 200) {
+        throw 'Không đọc được audio (HTTP ${res.statusCode})';
+      }
+      final filename = 'voice_${DateTime.now().millisecondsSinceEpoch}.webm';
+      final uploaded = await api.upload(
+        bytes: res.bodyBytes,
+        filename: filename,
+        mimeType: 'audio/webm',
+      );
+      final mediaUrl = _absUrl((uploaded['url'] ?? uploaded['path']) as String);
+      await api.post('/conversations/${widget.conversationId}/messages', body: {
+        'type': 'audio',
+        'body': '',
+        'media_url': mediaUrl,
+      });
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(_friendlyError(e))));
+    }
+  }
+
+  Future<void> _toggleBlock() async {
+    if (widget.peerId == null) return;
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (_blocked) {
+        await api.post('/users/unblock', body: {'user_id': widget.peerId});
+        messenger.showSnackBar(
+            const SnackBar(content: Text('Đã bỏ chặn người dùng')));
+      } else {
+        await api.post('/users/block', body: {'user_id': widget.peerId});
+        messenger.showSnackBar(
+            const SnackBar(content: Text('Đã chặn người dùng')));
+      }
+      setState(() => _blocked = !_blocked);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _toggleMute() async {
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+    final until = _muted ? null : DateTime.now().add(const Duration(days: 365)).toUtc().toIso8601String();
+    try {
+      await api.post('/conversations/${widget.conversationId}/mute',
+          body: {'until': until});
+      setState(() => _muted = !_muted);
+      messenger.showSnackBar(SnackBar(
+          content: Text(_muted ? 'Đã tắt thông báo' : 'Đã bật thông báo lại')));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
     }
@@ -266,42 +522,77 @@ class _ChatScreenState extends State<ChatScreen> {
           avatarUrl: widget.peerAvatar,
           online: _peerOnline,
           typing: _typingUsers.isNotEmpty,
+          muted: _muted,
+          blocked: _blocked,
+          canBlock: widget.peerId != null && !widget.isGroup,
+          isGroup: widget.isGroup,
+          onToggleSearch: () => setState(() => _searching = !_searching),
+          onTapHeader: widget.isGroup
+              ? () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => GroupInfoScreen(
+                      conversationId: widget.conversationId,
+                      title: widget.title,
+                      avatarUrl: widget.peerAvatar,
+                    ),
+                  ),
+                )
+              : null,
           onVoiceCall: () => _startCall('voice'),
           onVideoCall: () => _startCall('video'),
+          onToggleMute: _toggleMute,
+          onToggleBlock: _toggleBlock,
         ),
       ),
       body: ChatBackground(
-        child: Column(
-          children: [
-            Expanded(
-              child: _loading
-                  ? const Center(
-                      child:
-                          CircularProgressIndicator(color: AppPalette.indigo))
-                  : _messages.isEmpty
-                      ? const _EmptyChat()
-                      : _buildList(),
-            ),
-            if (_typingUsers.isNotEmpty)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 16, 6),
-                child: Row(
-                  children: [
-                    TypingDots(),
-                    SizedBox(width: 8),
-                    Text('Đang nhập...',
-                        style: TextStyle(
-                            color: AppPalette.textSecondary, fontSize: 12)),
-                  ],
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: AppLayout.chatContentMaxWidth),
+            child: Column(
+              children: [
+                if (_searching) _searchBar(),
+                if (_pinnedHead != null && !_searching) _pinnedBanner(_pinnedHead!),
+                Expanded(
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator(color: AppPalette.indigo))
+                      : _messages.isEmpty
+                          ? const _EmptyChat()
+                          : _buildList(),
                 ),
-              ),
-            _Composer(
-              controller: _input,
-              onChanged: _handleInputChanged,
-              onSend: _send,
-              onAttachImage: _attachImage,
+                if (_typingUsers.isNotEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 0, 16, 6),
+                    child: Row(
+                      children: [
+                        TypingDots(),
+                        SizedBox(width: 8),
+                        Text('Đang nhập...',
+                            style: TextStyle(color: AppPalette.textSecondary, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                if (_replyingTo != null && !_recording)
+                  _ReplyPreview(
+                    message: _replyingTo!,
+                    onClose: () => setState(() => _replyingTo = null),
+                  ),
+                if (_recording)
+                  VoiceRecorder(
+                    onSend: _sendVoice,
+                    onCancel: () => setState(() => _recording = false),
+                  )
+                else
+                  _Composer(
+                    controller: _input,
+                    onChanged: _handleInputChanged,
+                    onSend: _send,
+                    onAttachImage: _attachImage,
+                    onStartVoice: () => setState(() => _recording = true),
+                  ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -309,18 +600,56 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildList() {
     final df = DateFormat('EEE, dd/MM');
+    final visible = _searching && _searchQuery.trim().isNotEmpty
+        ? _messages
+            .where((m) =>
+                !m.recalled &&
+                m.body.toLowerCase().contains(_searchQuery.toLowerCase()))
+            .toList()
+        : _messages;
+    if (_searching && visible.isEmpty && _searchQuery.trim().isNotEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Text(
+            'Không tìm thấy tin nhắn nào khớp “$_searchQuery”',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppPalette.textSecondary),
+          ),
+        ),
+      );
+    }
+    final extra = (_hasMore || _loadingMore) && !_searching ? 1 : 0;
     return ListView.builder(
       controller: _scroll,
       reverse: true,
       padding: const EdgeInsets.fromLTRB(8, 14, 8, 14),
-      itemCount: _messages.length,
+      itemCount: visible.length + extra,
       itemBuilder: (_, i) {
-        final m = _messages[i];
+        if (i == visible.length) {
+          // Top sentinel (because list is reversed): older-messages spinner.
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            child: Center(
+              child: _hasMore
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: AppPalette.indigo),
+                    )
+                  : const Text('— Hết lịch sử —',
+                      style: TextStyle(
+                          color: AppPalette.textSecondary, fontSize: 11)),
+            ),
+          );
+        }
+        final m = visible[i];
         final mine = m.senderId == _myId;
-        final older = i < _messages.length - 1 ? _messages[i + 1] : null;
+        final older = i < visible.length - 1 ? visible[i + 1] : null;
         final showDayHeader = older == null ||
             !_sameDay(older.createdAt.toLocal(), m.createdAt.toLocal());
-        final newer = i > 0 ? _messages[i - 1] : null;
+        final newer = i > 0 ? visible[i - 1] : null;
         final showTail = newer == null || newer.senderId != m.senderId;
         final seen = mine &&
             _peerLastRead != null &&
@@ -333,8 +662,7 @@ class _ChatScreenState extends State<ChatScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                   decoration: BoxDecoration(
                     color: AppPalette.indigo.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(20),
@@ -349,37 +677,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
               ),
-            Dismissible(
-              key: ValueKey(m.id),
-              direction: mine && !m.recalled
-                  ? DismissDirection.endToStart
-                  : DismissDirection.none,
-              confirmDismiss: (_) async {
-                _recall(m);
-                return false;
-              },
-              background: const SizedBox.shrink(),
-              secondaryBackground: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Icon(Icons.undo, color: Colors.red),
-                  ),
-                ),
-              ),
-              child: MessageBubble(
-                message: m,
-                mine: mine,
-                showTail: showTail,
-                seen: seen,
-                onLongPress: mine && !m.recalled ? () => _recall(m) : null,
-              ),
+            MessageBubble(
+              message: m,
+              mine: mine,
+              showTail: showTail,
+              seen: seen,
+              onLongPress: () => _onBubbleLongPress(m),
             ),
           ],
         );
@@ -389,6 +692,102 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+
+  Widget _pinnedBanner(Message m) {
+    final preview = m.recalled
+        ? '[đã thu hồi]'
+        : (m.type == 'text' ? m.body : '[${m.type}]');
+    return Container(
+      decoration: BoxDecoration(
+        color: AppPalette.coral.withValues(alpha: 0.08),
+        border: const Border(
+          bottom: BorderSide(color: AppPalette.divider),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 30,
+            decoration: BoxDecoration(
+              color: AppPalette.coral,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Icon(Icons.push_pin, size: 14, color: AppPalette.coral),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Tin nhắn ghim',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppPalette.coral,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  preview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: AppPalette.textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Bỏ ghim',
+            icon: const Icon(Icons.close,
+                size: 18, color: AppPalette.textSecondary),
+            onPressed: () => _togglePin(m),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _searchBar() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: AppPalette.divider)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+      child: Row(
+        children: [
+          const Icon(Icons.search, color: AppPalette.indigo),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              autofocus: true,
+              onChanged: (v) => setState(() => _searchQuery = v),
+              decoration: const InputDecoration(
+                hintText: 'Tìm trong cuộc trò chuyện này...',
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.symmetric(vertical: 8),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, color: AppPalette.textSecondary),
+            onPressed: () => setState(() {
+              _searching = false;
+              _searchQuery = '';
+            }),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ChatAppBar extends StatelessWidget {
@@ -396,15 +795,31 @@ class _ChatAppBar extends StatelessWidget {
   final String avatarUrl;
   final bool online;
   final bool typing;
+  final bool muted;
+  final bool blocked;
+  final bool canBlock; // false for group chats
+  final bool isGroup;
+  final VoidCallback? onTapHeader; // open group info
   final VoidCallback onVoiceCall;
   final VoidCallback onVideoCall;
+  final VoidCallback onToggleMute;
+  final VoidCallback onToggleBlock;
+  final VoidCallback onToggleSearch;
   const _ChatAppBar({
     required this.title,
     required this.avatarUrl,
     required this.online,
     required this.typing,
+    required this.muted,
+    required this.blocked,
+    required this.canBlock,
+    required this.isGroup,
+    required this.onTapHeader,
     required this.onVoiceCall,
     required this.onVideoCall,
+    required this.onToggleMute,
+    required this.onToggleBlock,
+    required this.onToggleSearch,
   });
 
   @override
@@ -425,50 +840,184 @@ class _ChatAppBar extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
           child: Row(
             children: [
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                    color: AppPalette.textPrimary),
-              ),
-              UserAvatar(name: title, url: avatarUrl, size: 42, online: online),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 15)),
-                    const SizedBox(height: 2),
-                    Text(
-                      typing
-                          ? 'Đang soạn tin...'
-                          : (online ? 'Đang hoạt động' : 'Ngoại tuyến'),
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: typing
-                            ? AppPalette.indigo
-                            : (online
-                                ? AppPalette.mint
-                                : AppPalette.textSecondary),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+              Material(
+                color: Colors.transparent,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => Navigator.pop(context),
+                  child: const SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: Icon(Icons.arrow_back_ios_new_rounded,
+                        color: AppPalette.textPrimary, size: 20),
+                  ),
                 ),
               ),
-              IconButton(
-                onPressed: onVoiceCall,
-                icon: const Icon(Icons.call_outlined, color: AppPalette.indigo),
-                tooltip: 'Gọi thoại',
+              GestureDetector(
+                onTap: onTapHeader,
+                child: UserAvatar(
+                    name: title, url: avatarUrl, size: 42, online: online),
               ),
-              IconButton(
-                onPressed: onVideoCall,
-                icon: const Icon(Icons.videocam_outlined,
-                    color: AppPalette.indigo),
+              const SizedBox(width: 10),
+              Expanded(
+                child: InkWell(
+                  onTap: onTapHeader,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(title,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700, fontSize: 15)),
+                            ),
+                            if (muted) ...[
+                              const SizedBox(width: 6),
+                              const Icon(Icons.notifications_off,
+                                  size: 14, color: AppPalette.textSecondary),
+                            ],
+                            if (isGroup) ...[
+                              const SizedBox(width: 4),
+                              const Icon(Icons.chevron_right,
+                                  size: 16, color: AppPalette.textSecondary),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          typing
+                              ? 'Đang soạn tin...'
+                              : (isGroup
+                                  ? 'Nhấn để xem thành viên'
+                                  : (online ? 'Đang hoạt động' : 'Ngoại tuyến')),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: typing
+                                ? AppPalette.indigo
+                                : (isGroup
+                                    ? AppPalette.textSecondary
+                                    : (online
+                                        ? AppPalette.mint
+                                        : AppPalette.textSecondary)),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              _AppBarIconBtn(
+                icon: Icons.call_outlined,
+                tooltip: 'Gọi thoại',
+                onPressed: onVoiceCall,
+              ),
+              _AppBarIconBtn(
+                icon: Icons.videocam_outlined,
                 tooltip: 'Gọi video',
+                onPressed: onVideoCall,
+              ),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.more_vert, color: AppPalette.textPrimary),
+                tooltip: 'Tuỳ chọn',
+                padding: EdgeInsets.zero,
+                onSelected: (v) {
+                  if (v == 'search') onToggleSearch();
+                  if (v == 'mute') onToggleMute();
+                  if (v == 'block') onToggleBlock();
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'search',
+                    child: Row(
+                      children: [
+                        Icon(Icons.search,
+                            size: 18, color: AppPalette.textPrimary),
+                        SizedBox(width: 10),
+                        Text('Tìm tin nhắn'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'mute',
+                    child: Row(
+                      children: [
+                        Icon(
+                            muted
+                                ? Icons.notifications_active
+                                : Icons.notifications_off,
+                            size: 18,
+                            color: AppPalette.textPrimary),
+                        const SizedBox(width: 10),
+                        Text(muted ? 'Bật thông báo' : 'Tắt thông báo'),
+                      ],
+                    ),
+                  ),
+                  if (canBlock)
+                    PopupMenuItem(
+                      value: 'block',
+                      child: Row(
+                        children: [
+                          Icon(blocked ? Icons.lock_open : Icons.block,
+                              size: 18,
+                              color:
+                                  blocked ? AppPalette.indigo : Colors.red),
+                          const SizedBox(width: 10),
+                          Text(
+                            blocked
+                                ? 'Bỏ chặn người dùng'
+                                : 'Chặn người dùng',
+                            style: TextStyle(
+                              color:
+                                  blocked ? AppPalette.indigo : Colors.red,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Reliable AppBar icon button: explicit constraints so it always renders.
+/// Plain IconButton inside crowded AppBar Rows can collapse to zero width
+/// on some web/desktop layouts; this guarantees a 40x40 hit area.
+class _AppBarIconBtn extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  const _AppBarIconBtn({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox(
+            width: 40,
+            height: 40,
+            child: Icon(icon, color: AppPalette.indigo, size: 22),
           ),
         ),
       ),
@@ -481,11 +1030,13 @@ class _Composer extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback onSend;
   final VoidCallback onAttachImage;
+  final VoidCallback onStartVoice;
   const _Composer({
     required this.controller,
     required this.onChanged,
     required this.onSend,
     required this.onAttachImage,
+    required this.onStartVoice,
   });
 
   @override
@@ -506,6 +1057,8 @@ class _Composer extends StatelessWidget {
         child: Row(
           children: [
             _circleIcon(Icons.image_outlined, onAttachImage),
+            const SizedBox(width: 6),
+            _circleIcon(Icons.mic_none_rounded, onStartVoice),
             const SizedBox(width: 6),
             Expanded(
               child: Container(
@@ -528,8 +1081,8 @@ class _Composer extends StatelessWidget {
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
                           focusedBorder: InputBorder.none,
-                          contentPadding: EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 10),
+                          contentPadding:
+                              EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         ),
                       ),
                     ),
@@ -583,6 +1136,76 @@ class _Composer extends StatelessWidget {
   }
 }
 
+class _ReplyPreview extends StatelessWidget {
+  final Message message;
+  final VoidCallback onClose;
+  const _ReplyPreview({required this.message, required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    final body = message.recalled
+        ? '[đã thu hồi]'
+        : (message.type == 'text'
+            ? message.body
+            : '[${message.type}]');
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          top: BorderSide(color: AppPalette.divider),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 36,
+            decoration: BoxDecoration(
+              color: AppPalette.indigo,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Icon(Icons.reply_rounded, size: 16, color: AppPalette.indigo),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Đang trả lời',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppPalette.indigo,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  body,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppPalette.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close, size: 18, color: AppPalette.textSecondary),
+            onPressed: onClose,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EmptyChat extends StatelessWidget {
   const _EmptyChat();
   @override
@@ -609,7 +1232,7 @@ class _EmptyChat extends StatelessWidget {
           const Text('Hãy gửi lời chào!',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
           const SizedBox(height: 6),
-          const Text('Vuốt trái để thu hồi tin của mình',
+          const Text('Giữ vào tin nhắn để thả cảm xúc',
               style: TextStyle(color: AppPalette.textSecondary, fontSize: 12)),
         ],
       ),

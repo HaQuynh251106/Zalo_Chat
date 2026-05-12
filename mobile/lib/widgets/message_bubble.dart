@@ -1,7 +1,9 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/message.dart';
 import '../theme.dart';
+import 'audio_message_bubble.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message message;
@@ -32,6 +34,9 @@ class MessageBubble extends StatelessWidget {
     final isRecalled = message.recalled;
     final isImage =
         message.type == 'image' && message.mediaUrl.isNotEmpty && !isRecalled;
+    final isAudio =
+        message.type == 'audio' && message.mediaUrl.isNotEmpty && !isRecalled;
+    final hasReply = message.replyToSnippet.isNotEmpty;
 
     final timeAndStatus = Row(
       mainAxisSize: MainAxisSize.min,
@@ -69,7 +74,9 @@ class MessageBubble extends StatelessWidget {
                   Container(width: 240, height: 180, color: Colors.black12),
             ),
           )
-        : Text(
+        : isAudio
+            ? AudioMessageBubble(url: message.mediaUrl, mine: mine)
+            : Text(
             isRecalled ? 'Tin nhắn đã được thu hồi' : message.body,
             style: TextStyle(
               color: isRecalled
@@ -110,28 +117,123 @@ class MessageBubble extends StatelessWidget {
         onLongPress: onLongPress,
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.78,
+            maxWidth: math.min(
+              MediaQuery.of(context).size.width * 0.78,
+              AppLayout.bubbleMaxWidth,
+            ),
           ),
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 6),
-            padding: isImage
-                ? const EdgeInsets.all(4)
-                : const EdgeInsets.fromLTRB(14, 8, 12, 6),
-            decoration: decoration,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Align(alignment: Alignment.centerLeft, child: content),
-                Padding(
-                  padding: EdgeInsets.only(
-                      top: isImage ? 6 : 2, right: isImage ? 6 : 0),
-                  child: timeAndStatus,
+          child: Column(
+            crossAxisAlignment:
+                mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 6),
+                padding: isImage
+                    ? const EdgeInsets.all(4)
+                    : const EdgeInsets.fromLTRB(14, 8, 12, 6),
+                decoration: decoration,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (hasReply && !isRecalled) _replyQuote(),
+                    content,
+                    Padding(
+                      padding: EdgeInsets.only(
+                          top: isImage ? 6 : 2, right: isImage ? 6 : 0),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: timeAndStatus,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (message.reactions.isNotEmpty && !isRecalled)
+                _reactionsFooter(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _replyQuote() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+      decoration: BoxDecoration(
+        color: mine
+            ? Colors.white.withValues(alpha: 0.15)
+            : AppPalette.indigo.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border(
+          left: BorderSide(
+            color: mine ? Colors.white : AppPalette.indigo,
+            width: 3,
+          ),
+        ),
+      ),
+      child: Text(
+        message.replyToSnippet,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 12,
+          color: mine
+              ? Colors.white.withValues(alpha: 0.9)
+              : AppPalette.textSecondary,
+          fontStyle: FontStyle.italic,
+        ),
+      ),
+    );
+  }
+
+  Widget _reactionsFooter() {
+    // Group by emoji + count
+    final grouped = <String, int>{};
+    for (final r in message.reactions) {
+      grouped[r.emoji] = (grouped[r.emoji] ?? 0) + 1;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, left: 12, right: 12),
+      child: Wrap(
+        spacing: 4,
+        children: grouped.entries.map((e) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppPalette.divider),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.05),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
-          ),
-        ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(e.key, style: const TextStyle(fontSize: 14)),
+                if (e.value > 1) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    '${e.value}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppPalette.textSecondary,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        }).toList(),
       ),
     );
   }

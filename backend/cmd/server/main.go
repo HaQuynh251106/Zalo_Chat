@@ -19,6 +19,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/feed"
 	"github.com/a1234/zalo-clone/backend/internal/media"
 	"github.com/a1234/zalo-clone/backend/internal/message"
+	"github.com/a1234/zalo-clone/backend/internal/reaction"
 	"github.com/a1234/zalo-clone/backend/internal/router"
 	"github.com/a1234/zalo-clone/backend/internal/session"
 	"github.com/a1234/zalo-clone/backend/internal/user"
@@ -59,6 +60,7 @@ func main() {
 	msgSvc := message.NewService(pool)
 	feedSvc := feed.NewService(pool)
 	callSvc := call.NewService(pool)
+	reactionSvc := reaction.NewService(pool)
 
 	hub := ws.NewHub(pool, rdb)
 
@@ -72,12 +74,13 @@ func main() {
 		AuthH:       auth.NewHandler(authSvc),
 		SessionH:    session.NewHandler(authSvc),
 		UserH:       user.NewHandler(userSvc),
-		ContactH:    contact.NewHandler(contactSvc),
-		ConvH:       conversation.NewHandler(convSvc, hub),
+		ContactH:    contact.NewHandler(contactSvc, hub),
+		ConvH:       conversation.NewHandler(convSvc, hub, userSvc.VerifyHidePin),
 		MsgH:        message.NewHandler(msgSvc, hub),
 		FeedH:       feed.NewHandler(feedSvc),
 		MediaH:      mediaH,
 		CallH:       call.NewHandler(callSvc, hub),
+		ReactionH:   reaction.NewHandler(reactionSvc, hub),
 		WSH:         ws.NewHandler(hub, cfg.WSWriteTimeout, cfg.WSPongWait),
 		AllowedOrgs: cfg.AllowedOrigins,
 	})

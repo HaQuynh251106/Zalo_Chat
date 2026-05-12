@@ -56,12 +56,13 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) SearchByPhone(w http.ResponseWriter, r *http.Request) {
+	me, _ := middleware.UserIDFrom(r.Context())
 	phone := r.URL.Query().Get("phone")
 	if phone == "" {
 		httpx.Error(w, http.StatusBadRequest, "missing phone")
 		return
 	}
-	p, err := h.svc.SearchByPhone(r.Context(), phone)
+	p, err := h.svc.SearchByPhone(r.Context(), me, phone)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "user not found")
@@ -108,6 +109,67 @@ func (h *Handler) Unblock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
+}
+
+type setPinReq struct {
+	OldPin string `json:"old_pin"`
+	NewPin string `json:"new_pin"`
+}
+
+func (h *Handler) HidePinStatus(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UserIDFrom(r.Context())
+	has, err := h.svc.HasHidePin(r.Context(), uid)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"has_pin": has})
+}
+
+func (h *Handler) SetHidePin(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UserIDFrom(r.Context())
+	var req setPinReq
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := h.svc.SetHidePin(r.Context(), uid, req.OldPin, req.NewPin); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidPin):
+			httpx.Error(w, http.StatusBadRequest, "pin must be 4-12 digits")
+		case errors.Is(err, ErrWrongPin):
+			httpx.Error(w, http.StatusUnauthorized, "wrong current pin")
+		default:
+			httpx.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type verifyPinReq struct {
+	Pin string `json:"pin"`
+}
+
+func (h *Handler) VerifyHidePin(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UserIDFrom(r.Context())
+	var req verifyPinReq
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := h.svc.VerifyHidePin(r.Context(), uid, req.Pin); err != nil {
+		switch {
+		case errors.Is(err, ErrPinNotSet):
+			httpx.Error(w, http.StatusBadRequest, "pin not set")
+		case errors.Is(err, ErrWrongPin):
+			httpx.Error(w, http.StatusUnauthorized, "wrong pin")
+		default:
+			httpx.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (h *Handler) ListBlocked(w http.ResponseWriter, r *http.Request) {

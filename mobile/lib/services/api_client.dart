@@ -53,6 +53,13 @@ class ApiClient {
           body: jsonEncode(body ?? {}),
         );
         break;
+      case 'PATCH':
+        res = await http.patch(
+          uri,
+          headers: _headers(),
+          body: jsonEncode(body ?? {}),
+        );
+        break;
       case 'DELETE':
         res = await http.delete(uri, headers: _headers());
         break;
@@ -77,6 +84,8 @@ class ApiClient {
   Future<dynamic> put(String path, {Object? body}) =>
       _request('PUT', path, body: body);
   Future<dynamic> delete(String path) => _request('DELETE', path);
+  Future<dynamic> patch(String path, {Object? body}) =>
+      _request('PATCH', path, body: body);
 
   /// Upload bytes to /upload. Returns the `data` payload of the response.
   Future<Map<String, dynamic>> upload({
