@@ -16,6 +16,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/reaction"
 	"github.com/a1234/zalo-clone/backend/internal/session"
 	"github.com/a1234/zalo-clone/backend/internal/user"
+	"github.com/a1234/zalo-clone/backend/internal/wallet"
 	"github.com/a1234/zalo-clone/backend/internal/ws"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -35,6 +36,7 @@ type Deps struct {
 	MediaH      *media.Handler
 	CallH       *call.Handler
 	ReactionH   *reaction.Handler
+	WalletH     *wallet.Handler
 	WSH         *ws.Handler
 	AllowedOrgs []string
 }
@@ -134,6 +136,12 @@ func New(d Deps) http.Handler {
 			r.Post("/calls/{id}/reject", d.CallH.Reject)
 			r.Post("/calls/{id}/end", d.CallH.End)
 			r.Post("/calls/{id}/signal", d.CallH.Signal)
+
+			// Wallet
+			r.Get("/wallet/me", d.WalletH.Me)
+			r.Get("/wallet/transactions", d.WalletH.History)
+			r.Post("/wallet/topup", d.WalletH.Topup)
+			r.Post("/wallet/transfer", d.WalletH.Transfer)
 
 			r.Get("/ws", d.WSH.ServeHTTP)
 		})

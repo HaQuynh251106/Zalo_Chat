@@ -8,6 +8,7 @@ import 'services/api_client.dart';
 import 'services/ws_client.dart';
 import 'theme.dart';
 import 'widgets/incoming_call_overlay.dart';
+import 'widgets/money_toast_overlay.dart';
 
 void main() {
   final api = ApiClient();
@@ -46,6 +47,8 @@ class _AuthGate extends StatelessWidget {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     if (!auth.isAuthenticated) return const LoginScreen();
-    return const IncomingCallOverlay(child: HomeShell());
+    return const IncomingCallOverlay(
+      child: MoneyToastOverlay(child: HomeShell()),
+    );
   }
 }

@@ -109,6 +109,17 @@ func (h *Hub) BroadcastToUsers(userIDs []uuid.UUID, ev Event) {
 	}
 }
 
+// BroadcastToUser delivers a single event to all live sockets of the given user.
+// Safe to call even when the user is offline (no-op).
+func (h *Hub) BroadcastToUser(userID uuid.UUID, ev Event) {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		log.Printf("[ws] marshal: %v", err)
+		return
+	}
+	h.sendToUser(userID, raw)
+}
+
 func (h *Hub) BroadcastToConversation(ctx context.Context, conv uuid.UUID, ev Event) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

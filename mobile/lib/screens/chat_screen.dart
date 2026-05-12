@@ -20,6 +20,7 @@ import '../widgets/user_avatar.dart';
 import '../widgets/voice_recorder.dart';
 import 'call_screen.dart';
 import 'group_info_screen.dart';
+import 'wallet_transfer_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
@@ -111,7 +112,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final t = ev['type'];
     final p = ev['payload'];
     if (p is! Map<String, dynamic>) return;
-    if (t == 'message.new') {
+    if (t == 'message.new' || t == 'message.created') {
       if (p['conversation_id'] != widget.conversationId) return;
       final incoming = Message.fromJson(p);
       if (_messages.any((m) => m.id == incoming.id)) return;
@@ -122,7 +123,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final id = p['id'] as String;
       final i = _messages.indexWhere((m) => m.id == id);
       if (i >= 0) {
-        setState(() => _messages[i] = _messages[i].copyWith(recalled: true, body: ''));
+        setState(() =>
+            _messages[i] = _messages[i].copyWith(recalled: true, body: ''));
       }
     } else if (t == 'message.reaction') {
       if (p['conversation_id'] != widget.conversationId) return;
@@ -190,7 +192,8 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _messages
           ..clear()
-          ..addAll(data.map((e) => Message.fromJson(e as Map<String, dynamic>)));
+          ..addAll(
+              data.map((e) => Message.fromJson(e as Map<String, dynamic>)));
         _hasMore = data.length >= 30;
         _loading = false;
       });
@@ -220,8 +223,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadPinned() async {
     try {
       final api = context.read<ApiClient>();
-      final data = await api
-          .get('/conversations/${widget.conversationId}/pinned') as List<dynamic>;
+      final data =
+          await api.get('/conversations/${widget.conversationId}/pinned')
+              as List<dynamic>;
       if (!mounted) return;
       setState(() {
         _pinnedHead = data.isEmpty
@@ -235,9 +239,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final api = context.read<ApiClient>();
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await api.post(m.isPinned
-          ? '/messages/${m.id}/unpin'
-          : '/messages/${m.id}/pin');
+      await api.post(
+          m.isPinned ? '/messages/${m.id}/unpin' : '/messages/${m.id}/pin');
       // optimistic: server will broadcast message.pinned and we'll refresh.
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
@@ -299,8 +302,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await picked.readAsBytes();
       final res = await api.upload(bytes: bytes, filename: picked.name);
       final mediaUrl = _absUrl((res['url'] ?? res['path']) as String);
-      await api
-          .post('/conversations/${widget.conversationId}/messages', body: {
+      await api.post('/conversations/${widget.conversationId}/messages', body: {
         'type': 'image',
         'body': '',
         'media_url': mediaUrl,
@@ -310,8 +312,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  String _absUrl(String pathOrUrl) =>
-      pathOrUrl.startsWith('http') ? pathOrUrl : '${AppConfig.apiBase}$pathOrUrl';
+  String _absUrl(String pathOrUrl) => pathOrUrl.startsWith('http')
+      ? pathOrUrl
+      : '${AppConfig.apiBase}$pathOrUrl';
 
   void _handleInputChanged(String value) {
     if (value.trim().isEmpty) {
@@ -361,7 +364,8 @@ class _ChatScreenState extends State<ChatScreen> {
         break;
       case 'copy':
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Đã sao chép'), duration: Duration(seconds: 1)),
+          const SnackBar(
+              content: Text('Đã sao chép'), duration: Duration(seconds: 1)),
         );
         break;
     }
@@ -454,6 +458,24 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _openMoneyTransfer() async {
+    if (widget.peerId == null || widget.isGroup) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chuyển tiền hiện chỉ hỗ trợ chat 1-1')),
+      );
+      return;
+    }
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => WalletTransferScreen(
+          initialUserId: widget.peerId,
+          initialName: widget.title,
+          initialAvatar: widget.peerAvatar,
+        ),
+      ),
+    );
+  }
+
   Future<void> _toggleBlock() async {
     if (widget.peerId == null) return;
     final api = context.read<ApiClient>();
@@ -465,8 +487,8 @@ class _ChatScreenState extends State<ChatScreen> {
             const SnackBar(content: Text('Đã bỏ chặn người dùng')));
       } else {
         await api.post('/users/block', body: {'user_id': widget.peerId});
-        messenger.showSnackBar(
-            const SnackBar(content: Text('Đã chặn người dùng')));
+        messenger
+            .showSnackBar(const SnackBar(content: Text('Đã chặn người dùng')));
       }
       setState(() => _blocked = !_blocked);
     } catch (e) {
@@ -477,7 +499,12 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _toggleMute() async {
     final api = context.read<ApiClient>();
     final messenger = ScaffoldMessenger.of(context);
-    final until = _muted ? null : DateTime.now().add(const Duration(days: 365)).toUtc().toIso8601String();
+    final until = _muted
+        ? null
+        : DateTime.now()
+            .add(const Duration(days: 365))
+            .toUtc()
+            .toIso8601String();
     try {
       await api.post('/conversations/${widget.conversationId}/mute',
           body: {'until': until});
@@ -529,15 +556,15 @@ class _ChatScreenState extends State<ChatScreen> {
           onToggleSearch: () => setState(() => _searching = !_searching),
           onTapHeader: widget.isGroup
               ? () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => GroupInfoScreen(
-                      conversationId: widget.conversationId,
-                      title: widget.title,
-                      avatarUrl: widget.peerAvatar,
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => GroupInfoScreen(
+                        conversationId: widget.conversationId,
+                        title: widget.title,
+                        avatarUrl: widget.peerAvatar,
+                      ),
                     ),
-                  ),
-                )
+                  )
               : null,
           onVoiceCall: () => _startCall('voice'),
           onVideoCall: () => _startCall('video'),
@@ -548,14 +575,18 @@ class _ChatScreenState extends State<ChatScreen> {
       body: ChatBackground(
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: AppLayout.chatContentMaxWidth),
+            constraints:
+                const BoxConstraints(maxWidth: AppLayout.chatContentMaxWidth),
             child: Column(
               children: [
                 if (_searching) _searchBar(),
-                if (_pinnedHead != null && !_searching) _pinnedBanner(_pinnedHead!),
+                if (_pinnedHead != null && !_searching)
+                  _pinnedBanner(_pinnedHead!),
                 Expanded(
                   child: _loading
-                      ? const Center(child: CircularProgressIndicator(color: AppPalette.indigo))
+                      ? const Center(
+                          child: CircularProgressIndicator(
+                              color: AppPalette.indigo))
                       : _messages.isEmpty
                           ? const _EmptyChat()
                           : _buildList(),
@@ -568,7 +599,8 @@ class _ChatScreenState extends State<ChatScreen> {
                         TypingDots(),
                         SizedBox(width: 8),
                         Text('Đang nhập...',
-                            style: TextStyle(color: AppPalette.textSecondary, fontSize: 12)),
+                            style: TextStyle(
+                                color: AppPalette.textSecondary, fontSize: 12)),
                       ],
                     ),
                   ),
@@ -588,6 +620,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     onChanged: _handleInputChanged,
                     onSend: _send,
                     onAttachImage: _attachImage,
+                    onSendMoney: _openMoneyTransfer,
                     onStartVoice: () => setState(() => _recording = true),
                   ),
               ],
@@ -662,7 +695,8 @@ class _ChatScreenState extends State<ChatScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                   decoration: BoxDecoration(
                     color: AppPalette.indigo.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(20),
@@ -875,7 +909,8 @@ class _ChatAppBar extends StatelessWidget {
                               child: Text(title,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                      fontWeight: FontWeight.w700, fontSize: 15)),
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 15)),
                             ),
                             if (muted) ...[
                               const SizedBox(width: 6),
@@ -895,7 +930,9 @@ class _ChatAppBar extends StatelessWidget {
                               ? 'Đang soạn tin...'
                               : (isGroup
                                   ? 'Nhấn để xem thành viên'
-                                  : (online ? 'Đang hoạt động' : 'Ngoại tuyến')),
+                                  : (online
+                                      ? 'Đang hoạt động'
+                                      : 'Ngoại tuyến')),
                           style: TextStyle(
                             fontSize: 11,
                             color: typing
@@ -924,7 +961,8 @@ class _ChatAppBar extends StatelessWidget {
                 onPressed: onVideoCall,
               ),
               PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert, color: AppPalette.textPrimary),
+                icon:
+                    const Icon(Icons.more_vert, color: AppPalette.textPrimary),
                 tooltip: 'Tuỳ chọn',
                 padding: EdgeInsets.zero,
                 onSelected: (v) {
@@ -966,16 +1004,12 @@ class _ChatAppBar extends StatelessWidget {
                         children: [
                           Icon(blocked ? Icons.lock_open : Icons.block,
                               size: 18,
-                              color:
-                                  blocked ? AppPalette.indigo : Colors.red),
+                              color: blocked ? AppPalette.indigo : Colors.red),
                           const SizedBox(width: 10),
                           Text(
-                            blocked
-                                ? 'Bỏ chặn người dùng'
-                                : 'Chặn người dùng',
+                            blocked ? 'Bỏ chặn người dùng' : 'Chặn người dùng',
                             style: TextStyle(
-                              color:
-                                  blocked ? AppPalette.indigo : Colors.red,
+                              color: blocked ? AppPalette.indigo : Colors.red,
                             ),
                           ),
                         ],
@@ -1030,12 +1064,14 @@ class _Composer extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback onSend;
   final VoidCallback onAttachImage;
+  final VoidCallback onSendMoney;
   final VoidCallback onStartVoice;
   const _Composer({
     required this.controller,
     required this.onChanged,
     required this.onSend,
     required this.onAttachImage,
+    required this.onSendMoney,
     required this.onStartVoice,
   });
 
@@ -1057,6 +1093,8 @@ class _Composer extends StatelessWidget {
         child: Row(
           children: [
             _circleIcon(Icons.image_outlined, onAttachImage),
+            const SizedBox(width: 6),
+            _circleIcon(Icons.payments_outlined, onSendMoney),
             const SizedBox(width: 6),
             _circleIcon(Icons.mic_none_rounded, onStartVoice),
             const SizedBox(width: 6),
@@ -1081,8 +1119,8 @@ class _Composer extends StatelessWidget {
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
                           focusedBorder: InputBorder.none,
-                          contentPadding:
-                              EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          contentPadding: EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
                         ),
                       ),
                     ),
@@ -1145,9 +1183,7 @@ class _ReplyPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final body = message.recalled
         ? '[đã thu hồi]'
-        : (message.type == 'text'
-            ? message.body
-            : '[${message.type}]');
+        : (message.type == 'text' ? message.body : '[${message.type}]');
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
       decoration: const BoxDecoration(
@@ -1197,7 +1233,8 @@ class _ReplyPreview extends StatelessWidget {
           ),
           IconButton(
             visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.close, size: 18, color: AppPalette.textSecondary),
+            icon: const Icon(Icons.close,
+                size: 18, color: AppPalette.textSecondary),
             onPressed: onClose,
           ),
         ],

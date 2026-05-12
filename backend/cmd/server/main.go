@@ -23,6 +23,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/router"
 	"github.com/a1234/zalo-clone/backend/internal/session"
 	"github.com/a1234/zalo-clone/backend/internal/user"
+	"github.com/a1234/zalo-clone/backend/internal/wallet"
 	"github.com/a1234/zalo-clone/backend/internal/ws"
 )
 
@@ -61,6 +62,7 @@ func main() {
 	feedSvc := feed.NewService(pool)
 	callSvc := call.NewService(pool)
 	reactionSvc := reaction.NewService(pool)
+	walletSvc := wallet.NewService(pool, msgSvc)
 
 	hub := ws.NewHub(pool, rdb)
 
@@ -81,6 +83,7 @@ func main() {
 		MediaH:      mediaH,
 		CallH:       call.NewHandler(callSvc, hub),
 		ReactionH:   reaction.NewHandler(reactionSvc, hub),
+		WalletH:     wallet.NewHandler(walletSvc, hub),
 		WSH:         ws.NewHandler(hub, cfg.WSWriteTimeout, cfg.WSPongWait),
 		AllowedOrgs: cfg.AllowedOrigins,
 	})

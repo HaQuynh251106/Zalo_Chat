@@ -11,19 +11,21 @@ import (
 )
 
 type Message struct {
-	ID             uuid.UUID  `json:"id"`
-	ConversationID uuid.UUID  `json:"conversation_id"`
-	SenderID       uuid.UUID  `json:"sender_id"`
-	Type           string     `json:"type"` // text|image|audio|video|file|system
-	Body           string     `json:"body"`
-	MediaURL       string     `json:"media_url,omitempty"`
-	ReplyToID      *uuid.UUID `json:"reply_to_id,omitempty"`
-	ReplyToSnippet string     `json:"reply_to_snippet,omitempty"`
-	ReplyToSender  *uuid.UUID `json:"reply_to_sender,omitempty"`
-	Recalled       bool       `json:"recalled"`
-	PinnedAt       *time.Time `json:"pinned_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	Reactions      []Reaction `json:"reactions,omitempty"`
+	ID               uuid.UUID  `json:"id"`
+	ConversationID   uuid.UUID  `json:"conversation_id"`
+	SenderID         uuid.UUID  `json:"sender_id"`
+	Type             string     `json:"type"` // text|image|audio|video|file|system|money
+	Body             string     `json:"body"`
+	MediaURL         string     `json:"media_url,omitempty"`
+	ReplyToID        *uuid.UUID `json:"reply_to_id,omitempty"`
+	ReplyToSnippet   string     `json:"reply_to_snippet,omitempty"`
+	ReplyToSender    *uuid.UUID `json:"reply_to_sender,omitempty"`
+	Recalled         bool       `json:"recalled"`
+	PinnedAt         *time.Time `json:"pinned_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	Reactions        []Reaction `json:"reactions,omitempty"`
+	MoneyAmountCents *int64     `json:"money_amount_cents,omitempty"`
+	MoneyTxnID       *uuid.UUID `json:"money_txn_id,omitempty"`
 }
 
 type Reaction struct {
@@ -140,7 +142,8 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		           CASE WHEN rep.recalled THEN '[đã thu hồi]'
 		                WHEN rep.type = 'text' THEN LEFT(rep.body, 80)
 		                ELSE '['||rep.type||']' END, '') AS reply_snippet,
-		       rep.sender_id AS reply_sender
+		       rep.sender_id AS reply_sender,
+		       m.money_amount_cents, m.money_txn_id
 		FROM messages m
 		LEFT JOIN messages rep ON rep.id = m.reply_to_id
 		WHERE m.conversation_id = $1
@@ -164,7 +167,8 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Body, &m.MediaURL,
-			&m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender); err != nil {
+			&m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt, &m.ReplyToSnippet, &m.ReplyToSender,
+			&m.MoneyAmountCents, &m.MoneyTxnID); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)
@@ -199,6 +203,46 @@ func (s *Service) List(ctx context.Context, conv, requester uuid.UUID, limit int
 		}
 	}
 	return msgs, nil
+}
+
+// InsertMoneyMessageTx inserts a "money" message inside an existing
+// transaction. It is intended for use by the wallet service so the message
+// insertion happens atomically with the balance update. txnID is the wallet
+// transaction's UUID and is stored on the message for traceability.
+func (s *Service) InsertMoneyMessageTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	conv, sender uuid.UUID,
+	amountCents int64,
+	txnID uuid.UUID,
+	memo string,
+) (Message, error) {
+	body := memo
+	preview := "[Tiền]"
+	var m Message
+	err := tx.QueryRow(ctx, `
+		INSERT INTO messages
+		    (conversation_id, sender_id, type, body, money_amount_cents, money_txn_id)
+		VALUES ($1, $2, 'money', $3, $4, $5)
+		RETURNING id, conversation_id, sender_id, type, body,
+		          COALESCE(media_url,''), reply_to_id, recalled, pinned_at, created_at,
+		          money_amount_cents, money_txn_id
+	`, conv, sender, body, amountCents, txnID).Scan(
+		&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Body, &m.MediaURL,
+		&m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt,
+		&m.MoneyAmountCents, &m.MoneyTxnID,
+	)
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE conversations
+		SET last_message_at = $2, last_message_preview = $3
+		WHERE id = $1
+	`, conv, m.CreatedAt, preview); err != nil {
+		return Message{}, err
+	}
+	return m, nil
 }
 
 // SetPin toggles pinned state. Caller must be a conversation member.
@@ -272,7 +316,8 @@ func (s *Service) ListPinned(ctx context.Context, conv, requester uuid.UUID) ([]
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, conversation_id, sender_id, type,
 		       CASE WHEN recalled THEN '' ELSE body END,
-		       COALESCE(media_url,''), reply_to_id, recalled, pinned_at, created_at
+		       COALESCE(media_url,''), reply_to_id, recalled, pinned_at, created_at,
+		       money_amount_cents, money_txn_id
 		FROM messages
 		WHERE conversation_id = $1 AND pinned_at IS NOT NULL
 		ORDER BY pinned_at DESC
@@ -285,7 +330,8 @@ func (s *Service) ListPinned(ctx context.Context, conv, requester uuid.UUID) ([]
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type,
-			&m.Body, &m.MediaURL, &m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt); err != nil {
+			&m.Body, &m.MediaURL, &m.ReplyToID, &m.Recalled, &m.PinnedAt, &m.CreatedAt,
+			&m.MoneyAmountCents, &m.MoneyTxnID); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

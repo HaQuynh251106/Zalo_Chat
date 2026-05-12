@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../models/message.dart';
 import '../theme.dart';
 import 'audio_message_bubble.dart';
+import 'money_message_bubble.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message message;
@@ -23,6 +24,14 @@ class MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Money messages get their own gold/amber card.
+    if (message.isMoney) {
+      return MoneyMessageBubble(
+        message: message,
+        mine: mine,
+        onLongPress: onLongPress,
+      );
+    }
     final df = DateFormat('HH:mm');
     final radius = BorderRadius.only(
       topLeft: const Radius.circular(18),
@@ -77,16 +86,16 @@ class MessageBubble extends StatelessWidget {
         : isAudio
             ? AudioMessageBubble(url: message.mediaUrl, mine: mine)
             : Text(
-            isRecalled ? 'Tin nhắn đã được thu hồi' : message.body,
-            style: TextStyle(
-              color: isRecalled
-                  ? (mine ? Colors.white70 : AppPalette.textSecondary)
-                  : (mine ? Colors.white : AppPalette.textPrimary),
-              fontStyle: isRecalled ? FontStyle.italic : FontStyle.normal,
-              fontSize: 15,
-              height: 1.35,
-            ),
-          );
+                isRecalled ? 'Tin nhắn đã được thu hồi' : message.body,
+                style: TextStyle(
+                  color: isRecalled
+                      ? (mine ? Colors.white70 : AppPalette.textSecondary)
+                      : (mine ? Colors.white : AppPalette.textPrimary),
+                  fontStyle: isRecalled ? FontStyle.italic : FontStyle.normal,
+                  fontSize: 15,
+                  height: 1.35,
+                ),
+              );
 
     final decoration = BoxDecoration(
       borderRadius: radius,

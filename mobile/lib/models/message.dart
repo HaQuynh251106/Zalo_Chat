@@ -22,6 +22,8 @@ class Message {
   final String replyToSnippet;
   final String? replyToSender;
   final List<MessageReaction> reactions;
+  final int? moneyAmountCents;
+  final String? moneyTxnId;
 
   Message({
     required this.id,
@@ -37,9 +39,12 @@ class Message {
     this.replyToSnippet = '',
     this.replyToSender,
     this.reactions = const [],
+    this.moneyAmountCents,
+    this.moneyTxnId,
   });
 
   bool get isPinned => pinnedAt != null;
+  bool get isMoney => type == 'money' && moneyAmountCents != null;
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
         id: j['id'] as String,
@@ -59,6 +64,8 @@ class Message {
         reactions: (j['reactions'] as List<dynamic>? ?? const [])
             .map((e) => MessageReaction.fromJson(e as Map<String, dynamic>))
             .toList(),
+        moneyAmountCents: (j['money_amount_cents'] as num?)?.toInt(),
+        moneyTxnId: j['money_txn_id'] as String?,
       );
 
   Message copyWith({
@@ -83,6 +90,8 @@ class Message {
         replyToSnippet: replyToSnippet,
         replyToSender: replyToSender,
         reactions: reactions ?? this.reactions,
+        moneyAmountCents: moneyAmountCents,
+        moneyTxnId: moneyTxnId,
       );
 }
 

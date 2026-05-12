@@ -8,6 +8,7 @@ import '../widgets/user_avatar.dart';
 import 'devices_screen.dart';
 import 'edit_profile_screen.dart';
 import 'hidden_chats_screen.dart';
+import 'wallet_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -90,6 +91,12 @@ class ProfileScreen extends StatelessWidget {
                   builder: (_) => const EditProfileScreen(),
                 ));
               }),
+              _tile(Icons.account_balance_wallet_outlined, 'Ví của tôi',
+                  onTap: () {
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const WalletScreen(),
+                ));
+              }),
               _tile(Icons.lock_outline, 'Bảo mật & quyền riêng tư'),
               _tile(Icons.visibility_off_outlined, 'Trò chuyện ẩn',
                   trailing: const Icon(Icons.lock,
@@ -143,8 +150,8 @@ class ProfileScreen extends StatelessWidget {
         await api.post('/me/hide-pin', body: {'new_pin': created['pin']});
         messenger.showSnackBar(
           const SnackBar(
-              content: Text(
-                  'Đã đặt PIN ẩn. Hãy giữ vào cuộc trò chuyện để ẩn nó.')),
+              content:
+                  Text('Đã đặt PIN ẩn. Hãy giữ vào cuộc trò chuyện để ẩn nó.')),
         );
         return;
       }
@@ -170,15 +177,13 @@ class ProfileScreen extends StatelessWidget {
               ),
               const SizedBox(height: 10),
               ListTile(
-                leading:
-                    const Icon(Icons.visibility, color: AppPalette.indigo),
+                leading: const Icon(Icons.visibility, color: AppPalette.indigo),
                 title: const Text('Xem trò chuyện ẩn'),
                 subtitle: const Text('Nhập PIN để mở khoá danh sách'),
                 onTap: () => Navigator.pop(context, 'view'),
               ),
               ListTile(
-                leading:
-                    const Icon(Icons.password, color: AppPalette.violet),
+                leading: const Icon(Icons.password, color: AppPalette.violet),
                 title: const Text('Đổi mã PIN'),
                 subtitle: const Text('Yêu cầu PIN hiện tại'),
                 onTap: () => Navigator.pop(context, 'change'),
@@ -217,8 +222,7 @@ class ProfileScreen extends StatelessWidget {
     } catch (e) {
       final msg = e.toString();
       messenger.showSnackBar(SnackBar(
-        content: Text(
-            msg.contains('wrong pin') ? 'Mã PIN không đúng' : '$e'),
+        content: Text(msg.contains('wrong pin') ? 'Mã PIN không đúng' : '$e'),
       ));
     }
   }
