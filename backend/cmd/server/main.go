@@ -20,6 +20,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/media"
 	"github.com/a1234/zalo-clone/backend/internal/message"
 	"github.com/a1234/zalo-clone/backend/internal/router"
+	"github.com/a1234/zalo-clone/backend/internal/session"
 	"github.com/a1234/zalo-clone/backend/internal/user"
 	"github.com/a1234/zalo-clone/backend/internal/ws"
 )
@@ -63,6 +64,7 @@ func main() {
 	r := router.New(router.Deps{
 		Issuer:      issuer,
 		AuthH:       auth.NewHandler(authSvc),
+		SessionH:    session.NewHandler(authSvc),
 		UserH:       user.NewHandler(userSvc),
 		ContactH:    contact.NewHandler(contactSvc),
 		ConvH:       conversation.NewHandler(convSvc, hub),

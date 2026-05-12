@@ -13,6 +13,7 @@ import (
 	"github.com/a1234/zalo-clone/backend/internal/media"
 	"github.com/a1234/zalo-clone/backend/internal/message"
 	"github.com/a1234/zalo-clone/backend/internal/middleware"
+	"github.com/a1234/zalo-clone/backend/internal/session"
 	"github.com/a1234/zalo-clone/backend/internal/user"
 	"github.com/a1234/zalo-clone/backend/internal/ws"
 	"github.com/go-chi/chi/v5"
@@ -24,6 +25,7 @@ import (
 type Deps struct {
 	Issuer      *auth.TokenIssuer
 	AuthH       *auth.Handler
+	SessionH    *session.Handler
 	UserH       *user.Handler
 	ContactH    *contact.Handler
 	ConvH       *conversation.Handler
@@ -73,11 +75,11 @@ func New(d Deps) http.Handler {
 			r.Get("/me", d.UserH.Me)
 			r.Put("/me", d.UserH.UpdateMe)
 			r.Put("/me/push-token", d.UserH.UpdatePushToken)
-			r.Get("/me/devices", d.AuthH.ListDevices)
-			r.Delete("/me/devices", d.AuthH.LogoutAllDevices)
-			r.Delete("/me/devices/{deviceID}", d.AuthH.LogoutDevice)
+			r.Get("/me/devices", d.SessionH.ListDevices)
+			r.Delete("/me/devices", d.SessionH.LogoutAllDevices)
+			r.Delete("/me/devices/{deviceID}", d.SessionH.LogoutDevice)
 			r.Get("/users/search", d.UserH.SearchByPhone)
-			r.Post("/auth/logout", d.AuthH.LogoutCurrent)
+			r.Post("/auth/logout", d.SessionH.LogoutCurrent)
 
 			r.Get("/contacts", d.ContactH.List)
 			r.Post("/contacts/request", d.ContactH.Request)
