@@ -119,6 +119,36 @@ flutter run --dart-define=API_BASE=http://localhost:8080
 flutter run --dart-define=API_BASE=http://10.0.2.2:8080
 ```
 
+## Running tests locally
+
+Backend:
+
+```bash
+cd backend
+go vet ./...
+go build ./...
+go test ./... -race -count=1 -timeout=120s
+```
+
+Mobile:
+
+```bash
+cd mobile
+flutter pub get
+flutter analyze
+flutter test
+```
+
+CI:
+
+- `.github/workflows/backend.yml` runs Go vet, build, and tests on every push and pull request.
+- `.github/workflows/mobile.yml` runs Flutter dependency install, analyze, and tests on every push and pull request.
+
+Known failures:
+
+- On a clean checkout of `main`, backend vet/build/test currently fail because `backend/internal/router` references device/logout methods that are not implemented on `auth.Handler` yet (`ListDevices`, `LogoutAllDevices`, `LogoutDevice`, `LogoutCurrent`). This is tracked outside Task 001 because auth/device handling is out of scope for the CI baseline.
+- On a clean checkout of `main`, `flutter analyze` currently reports existing lint issues in `mobile/lib/screens/call_screen.dart`, `mobile/lib/screens/devices_screen.dart`, and `mobile/lib/screens/feed_screen.dart`. Screen/UI changes are out of scope for Task 001.
+
 ---
 
 ## API tóm tắt

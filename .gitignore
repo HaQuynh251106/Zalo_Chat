@@ -2,6 +2,7 @@
 backend/bin/
 backend/server
 backend/.env
+backend/coverage.out
 *.test
 *.out
 
@@ -15,6 +16,7 @@ mobile/ios/Pods/
 mobile/ios/Flutter/Flutter.framework
 mobile/ios/Flutter/Flutter.podspec
 mobile/.idea/
+mobile/coverage/
 
 # Misc
 .DS_Store
